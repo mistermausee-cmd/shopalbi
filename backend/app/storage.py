@@ -156,7 +156,8 @@ class Storage:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA temp_store=MEMORY")
-            conn.execute("PRAGMA cache_size=-32000")   # ~32 MB page cache
+            conn.execute(f"PRAGMA cache_size=-{config.SQLITE_CACHE_MB * 1000}")
+            conn.execute(f"PRAGMA mmap_size={config.SQLITE_MMAP_MB * 1024 * 1024}")
             self._local.conn = conn
         return conn
 

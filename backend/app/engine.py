@@ -143,6 +143,29 @@ def reliability(fresh: float, liq: float, stab: float, depth: float | None, comp
     )))
 
 
+def depth_trust(age_minutes: float, max_minutes: float) -> float:
+    """How much of a live order's amount we are willing to count on.
+
+    Full credit while the order is fresh, then a linear decay to
+    ORDER_STALE_TRUST at the retention limit. This is what lets the retention
+    window be wide (coverage) without the planner promising quantities that
+    have already been bought by someone else (accuracy).
+    """
+    fresh = config.ORDER_TRUST_FRESH_MINUTES
+    if age_minutes <= fresh:
+        return 1.0
+    span = max(1e-6, max_minutes - fresh)
+    k = _clamp((age_minutes - fresh) / span)
+    return 1.0 - k * (1.0 - config.ORDER_STALE_TRUST)
+
+
+def _usable(amount: int, age_minutes: float, max_minutes: float) -> int:
+    """Discounted amount, never rounding a real order down to nothing."""
+    if amount <= 0:
+        return 0
+    return max(1, int(amount * depth_trust(age_minutes, max_minutes)))
+
+
 def city_gank_rate(city: str, base: float) -> float:
     return _clamp(base * config.CITY_RISK_MULTIPLIER.get(city, 1.0), 0.0, 0.95)
 
@@ -258,37 +281,56 @@ class Analytics:
         order be filled from several held qualities; keeping a single shared
         pool per item is what stops us double-counting the same NPC order.
         """
-        min_seen, now = self._book_window(config.BM_ORDER_MAX_AGE_MINUTES)
+        cap = config.BM_ORDER_MAX_AGE_MINUTES
+        min_seen, now = self._book_window(cap)
         rows = self.storage.live_book("request", min_seen, now, city=config.BLACK_MARKET)
         out: dict[str, list[list]] = defaultdict(list)
         now_dt = datetime.now(timezone.utc)
         for r in rows:
             seen = _parse_iso(r["seen_at"])
-            age = (now_dt - seen).total_seconds() / 3600.0 if seen else 99.0
-            out[r["item_id"]].append([r["price"], r["amount"], r["quality"], age])
+            age_min = (now_dt - seen).total_seconds() / 60.0 if seen else cap
+            amount = _usable(r["amount"], age_min, cap)
+            if amount <= 0:
+                continue
+            out[r["item_id"]].append([r["price"], amount, r["quality"], age_min / 60.0])
         for lst in out.values():
             lst.sort(key=lambda x: -x[0])
         return out
 
     def _city_offers(self, city: str | None = None) -> dict[tuple, list[list]]:
-        """Live sell offers per (city, item): [price, amount, quality]."""
-        min_seen, now = self._book_window(config.ORDER_MAX_AGE_MINUTES)
+        """Live sell offers per (city, item): [price, amount, quality, age_h]."""
+        cap = config.ORDER_MAX_AGE_MINUTES
+        min_seen, now = self._book_window(cap)
         rows = self.storage.live_book("offer", min_seen, now, city=city)
         out: dict[tuple, list[list]] = defaultdict(list)
+        now_dt = datetime.now(timezone.utc)
         for r in rows:
             if r["city"] == config.BLACK_MARKET:
                 continue
-            out[(r["city"], r["item_id"])].append([r["price"], r["amount"], r["quality"]])
+            seen = _parse_iso(r["seen_at"])
+            age_min = (now_dt - seen).total_seconds() / 60.0 if seen else cap
+            amount = _usable(r["amount"], age_min, cap)
+            if amount <= 0:
+                continue
+            out[(r["city"], r["item_id"])].append(
+                [r["price"], amount, r["quality"], age_min / 60.0]
+            )
         for lst in out.values():
             lst.sort(key=lambda x: x[0])
         return out
 
     @staticmethod
-    def _depth_units(offers: list[list], requests: list[list], quality: int) -> tuple[int, int]:
-        """(city units offered at quality<=... , BM units demanded) for a quality."""
-        city_units = sum(a for _p, a, q in offers if q == quality)
+    def _depth_units(offers: list[list], requests: list[list], quality: int) -> tuple[int, int, float]:
+        """(city units at this quality, BM units reachable from it, newest age h).
+
+        Amounts are already age-discounted by `_usable`, so these are the
+        quantities we are prepared to stand behind, not the raw book totals.
+        """
+        city_units = sum(a for _p, a, q, _age in offers if q == quality)
         bm_units = sum(a for _p, a, q, _age in requests if q <= quality)
-        return city_units, bm_units
+        ages = [age for _p, _a, q, age in offers if q == quality]
+        ages += [age for _p, _a, q, age in requests if q <= quality]
+        return city_units, bm_units, (min(ages) if ages else 0.0)
 
     # -- flip finder --------------------------------------------------------
 
@@ -348,11 +390,14 @@ class Analytics:
 
             qty_city = qty_bm = None
             depth = None
+            depth_age = None
             if use_depth:
                 o = offers.get((r["buy_city"], r["item_id"]))
                 q_req = bm_req.get(r["item_id"])
                 if o or q_req:
-                    qty_city, qty_bm = self._depth_units(o or [], q_req or [], r["quality"])
+                    qty_city, qty_bm, depth_age = self._depth_units(
+                        o or [], q_req or [], r["quality"]
+                    )
                     depth = _clamp(min(qty_city, qty_bm) / _DEPTH_REF)
             score = reliability(fresh, liq, stab, depth, comp)
 
@@ -408,6 +453,7 @@ class Analytics:
                 "avail_city": qty_city,
                 "avail_bm": qty_bm,
                 "available": available,
+                "depth_age_h": None if depth_age is None else round(depth_age, 1),
                 "est_absorb_h": round(24.0 / bm_daily, 2) if bm_daily > 0 else None,
                 "reliability": score,
                 # Headline composite: expected profit per unit after transport
@@ -791,7 +837,7 @@ class Analytics:
                 # Real depth. One shared pool of BM buy orders per item, so the
                 # same NPC order can never be sold into twice even though
                 # several held qualities are eligible for it (quality ladder).
-                for price, amount, held_q in sorted(offs, key=lambda x: x[0]):
+                for price, amount, held_q, _age in sorted(offs, key=lambda x: x[0]):
                     meta = meta_by_q.get(held_q)
                     if meta is None:
                         continue

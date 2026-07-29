@@ -34,7 +34,7 @@ const CITY_RU = {
   'Brecilien': 'Бресилиан', 'Black Market': 'Чёрный рынок',
 };
 const cityRu = (c) => CITY_RU[c] || c || '—';
-const WIN_RU = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц' };
+const WIN_RU = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц', quarter: '90 дней' };
 
 function timeAgo(iso) {
   if (!iso) return 'нет данных';
@@ -147,7 +147,7 @@ const H = {
   bmPrice: 'Текущая ставка выкупа Чёрного рынка. Стрелка «→ qN» значит, что продавать надо в ордер качества N (он принимает твоё качество и выше и платит больше).',
   vwap: 'Средневзвешенная по объёму цена ЧР за выбранный период. Если текущая ставка сильно выше — это скачок, а не норма.',
   vol: 'Сколько единиц Чёрный рынок реально выкупил в среднем за день по истории сделок.',
-  avail: 'Реально доступно по живому стакану: минимум из «сколько продают в городе» и «сколько готов купить ЧР». Прочерк — живых данных по предмету пока нет.',
+  avail: 'Реально доступно по живому стакану: минимум из «сколько продают в городе» и «сколько готов купить ЧР». Количество уценено по возрасту ордера: свежий считается полностью, у старого учитывается только часть — чтобы не обещать то, что уже купили. Прочерк — живых данных по предмету пока нет.',
   rel: 'Надёжность 0–100: свежесть цен (30%), ликвидность ЧР (22%), совпадение ставки с историей (25%), живая глубина (13%), конкуренция чужих sell-ордеров на ЧР (10%).',
   absorb: 'Сколько примерно времени ЧР съедает 1 шт при текущем обороте (24ч / шт в день). Мгновенная продажа в ордер происходит сразу — это оценка глубины спроса.',
   trend: 'Куда идёт цена ЧР: средняя за сутки против средней за выбранный период.',
@@ -182,7 +182,8 @@ function colsFlips() {
     { key: 'available', label: 'Доступно', hint: H.avail,
       render: (r) => r.available == null
         ? '<span class="dimc">—</span>'
-        : `<span class="num">${fmt(r.available)}</span><span class="sub2">город ${fmt(r.avail_city)} / ЧР ${fmt(r.avail_bm)}</span>`,
+        : `<span class="num">${fmt(r.available)}</span><span class="sub2">город ${fmt(r.avail_city)} / ЧР ${fmt(r.avail_bm)}`
+          + (r.depth_age_h != null ? ` · ${hours(r.depth_age_h)}` : '') + '</span>',
       csv: (r) => (r.available == null ? '' : r.available) },
     { key: 'bm_trend', label: 'Тренд', hint: H.trend,
       render: (r) => `<span class="num ${r.bm_trend_pct >= 0 ? 'pos' : 'neg'}">${pct(r.bm_trend_pct)}</span>`,
@@ -588,6 +589,13 @@ async function initMeta() {
   for (const t of m.tiers) opt($('#tier'), t, 'T' + t);
   for (const e of m.enchants) opt($('#enchant'), e, e === 0 ? 'Без зач. (.0)' : '.' + e);
   for (const q of m.qualities) opt($('#quality'), q.id, q.label);
+
+  // Window buttons come from the server so a new window needs no HTML edit.
+  if (!m.windows.some((w) => w.id === state.window)) state.window = m.windows[0].id;
+  $('#windowSwitch').innerHTML = m.windows.map((w) =>
+    `<button class="seg-btn${w.id === state.window ? ' active' : ''}" data-window="${esc(w.id)}"`
+    + ` title="последние ${w.days} полных суток UTC">${esc(w.label)}</button>`).join('');
+
   $('#gank').value = Math.round((m.gank_rate || 0.08) * 100);
   $('#gankVal').textContent = $('#gank').value + '%';
 }
@@ -621,7 +629,7 @@ function wire() {
   $('#windowSwitch').addEventListener('click', (e) => {
     const b = e.target.closest('.seg-btn');
     if (!b || b.classList.contains('active')) return;
-    document.querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+    $('#windowSwitch').querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
     b.classList.add('active');
     state.window = b.dataset.window;
     load();

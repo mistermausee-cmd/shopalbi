@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "5.0.0"
+VERSION = "5.1.0"
 
 
 def _get(name: str, default: str) -> str:
@@ -78,6 +78,12 @@ MAX_URL_LEN = _get_int("SHOPALBI_MAX_URL_LEN", 3900)
 
 HTTP_TIMEOUT = _get_float("SHOPALBI_HTTP_TIMEOUT", 60.0)
 HTTP_RETRIES = _get_int("SHOPALBI_HTTP_RETRIES", 4)
+
+# SQLite tuning. A full price refresh is only ~25-40 requests, so the AODP rate
+# limit is never the bottleneck — disk I/O on the history table is. Give SQLite
+# a real page cache and memory-mapped reads if the box has RAM to spare.
+SQLITE_CACHE_MB = _get_int("SHOPALBI_SQLITE_CACHE_MB", 64)
+SQLITE_MMAP_MB = _get_int("SHOPALBI_SQLITE_MMAP_MB", 256)
 
 
 # --- Market model -----------------------------------------------------------
@@ -285,11 +291,20 @@ NATS_TOPICS = [
 
 # How long a live order stays usable. The feed only carries markets that players
 # actually opened in game, at roughly a handful of orders per second worldwide,
-# so a 30-minute window leaves the book almost always empty. Several hours with
-# a visible age is far more useful than nothing.
-ORDER_MAX_AGE_MINUTES = _get_int("SHOPALBI_ORDER_MAX_AGE_MINUTES", 360)
-# BM buy orders decay fast in practice; keep a tighter window for them.
-BM_ORDER_MAX_AGE_MINUTES = _get_int("SHOPALBI_BM_ORDER_MAX_AGE_MINUTES", 90)
+# so a 30-minute window leaves the book almost always empty. A wide window with
+# an age discount beats no data at all.
+ORDER_MAX_AGE_MINUTES = _get_int("SHOPALBI_ORDER_MAX_AGE_MINUTES", 720)
+# BM buy orders move with PvE demand and decay faster; keep a tighter window.
+BM_ORDER_MAX_AGE_MINUTES = _get_int("SHOPALBI_BM_ORDER_MAX_AGE_MINUTES", 120)
+
+# Age discount on live depth. A wider retention window raises coverage but an
+# hours-old order may already be gone, and over-promising quantity is the exact
+# failure mode we are trying to kill ("buy 300x T4" when 12 exist). So an order
+# counts in full while it is fresh, then its usable amount decays linearly down
+# to ORDER_STALE_TRUST at the age limit. Quantities stay conservative as the
+# window widens instead of becoming fiction.
+ORDER_TRUST_FRESH_MINUTES = _get_int("SHOPALBI_ORDER_TRUST_FRESH_MINUTES", 30)
+ORDER_STALE_TRUST = _get_float("SHOPALBI_ORDER_STALE_TRUST", 0.5)
 ORDER_FLUSH_SECONDS = _get_float("SHOPALBI_ORDER_FLUSH_SECONDS", 3.0)
 ORDER_FLUSH_MAX = _get_int("SHOPALBI_ORDER_FLUSH_MAX", 2000)
 
@@ -323,9 +338,15 @@ NPC_EXPIRY_YEAR = _get_int("SHOPALBI_NPC_EXPIRY_YEAR", 2100)
 
 # --- Scheduling -------------------------------------------------------------
 
-CURRENT_REFRESH_MINUTES = _get_int("SHOPALBI_CURRENT_REFRESH_MINUTES", 10)
-HISTORY_REFRESH_HOURS = _get_int("SHOPALBI_HISTORY_REFRESH_HOURS", 6)
-HISTORY_DAYS = _get_int("SHOPALBI_HISTORY_DAYS", 31)
+# A full price refresh costs ~25-40 API calls out of a 180/min budget, so a
+# short interval is cheap. History is heavier (one call per item batch per
+# window span) but still nowhere near the limit.
+CURRENT_REFRESH_MINUTES = _get_int("SHOPALBI_CURRENT_REFRESH_MINUTES", 5)
+HISTORY_REFRESH_HOURS = _get_int("SHOPALBI_HISTORY_REFRESH_HOURS", 4)
+# AODP serves at least 180 days of daily buckets (verified). More history means
+# a far more stable VWAP for illiquid T7/T8 gear, which is exactly what the
+# spike guard depends on — many items only trade a handful of days per month.
+HISTORY_DAYS = _get_int("SHOPALBI_HISTORY_DAYS", 90)
 CATALOG_MAX_AGE_DAYS = _get_int("SHOPALBI_CATALOG_MAX_AGE_DAYS", 7)
 REFRESH_ON_START = _get_bool("SHOPALBI_REFRESH_ON_START", True)
 
@@ -342,11 +363,17 @@ BASIC_AUTH_USER = _get("SHOPALBI_AUTH_USER", "")
 BASIC_AUTH_PASS = _get("SHOPALBI_AUTH_PASS", "")
 
 
-# Windows offered on the stats tabs, in days. `day` means the last full day.
+# Windows offered on the stats tabs, in days. Each covers the last N *complete*
+# UTC days; today's partial bucket is excluded. `quarter` exists because thin
+# T7/T8 items trade only a few days a month — a 30-day window leaves their VWAP
+# too noisy to judge whether a live bid is a spike.
 STAT_WINDOWS = {
     "day": 1,
     "3d": 3,
     "week": 7,
     "month": 30,
+    "quarter": 90,
 }
-WINDOW_LABELS = {"day": "день", "3d": "3 дня", "week": "неделя", "month": "месяц"}
+WINDOW_LABELS = {
+    "day": "День", "3d": "3 дня", "week": "Неделя", "month": "Месяц", "quarter": "90 дней",
+}

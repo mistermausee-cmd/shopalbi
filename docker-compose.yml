@@ -14,9 +14,20 @@ services:
       - SHOPALBI_API_HOST=https://europe.albion-online-data.com
       - SHOPALBI_SALES_TAX=0.04
       - SHOPALBI_GANK_RATE=0.08
-      - SHOPALBI_CURRENT_REFRESH_MINUTES=10
-      - SHOPALBI_HISTORY_REFRESH_HOURS=6
       - SHOPALBI_LOG_DIR=/logs
+      # --- tuned for 4 vCPU / 16 GB ---
+      # A price refresh is only ~25-40 API calls out of 180/min, so 5 min is
+      # cheap. 90 days of history makes the VWAP (and the spike guard) far more
+      # reliable for thin T7/T8 gear that trades only a few days a month.
+      - SHOPALBI_CURRENT_REFRESH_MINUTES=5
+      - SHOPALBI_HISTORY_REFRESH_HOURS=4
+      - SHOPALBI_HISTORY_DAYS=90
+      - SHOPALBI_SQLITE_CACHE_MB=1024
+      - SHOPALBI_SQLITE_MMAP_MB=2048
+      # Wider live-order retention = better depth coverage. Quantities stay
+      # honest because older orders are age-discounted (see ORDER_STALE_TRUST).
+      - SHOPALBI_ORDER_MAX_AGE_MINUTES=720
+      - SHOPALBI_BM_ORDER_MAX_AGE_MINUTES=120
       # Optional password protection (leave empty to keep the site open):
       # - SHOPALBI_AUTH_USER=admin
       # - SHOPALBI_AUTH_PASS=change-me

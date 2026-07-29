@@ -43,12 +43,8 @@
 
   <section class="controls">
     <div class="ctl-row">
-      <div class="seg" id="windowSwitch" title="Период, за который считается средняя цена и оборот ЧР">
-        <button class="seg-btn active" data-window="day">День</button>
-        <button class="seg-btn" data-window="3d">3 дня</button>
-        <button class="seg-btn" data-window="week">Неделя</button>
-        <button class="seg-btn" data-window="month">Месяц</button>
-      </div>
+      <!-- filled from /api/meta so adding a window server-side needs no HTML change -->
+      <div class="seg" id="windowSwitch" title="Период, за который считается средняя цена и оборот ЧР"></div>
 
       <input type="search" id="search" class="input grow" placeholder="🔍 Поиск предмета или ID (T6_2H_AXE)…" />
 
