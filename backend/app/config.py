@@ -163,3 +163,23 @@ STAT_WINDOWS = {
     "week": 7,
     "month": 30,
 }
+
+
+# --- Full order-book depth (captured client-side) ---------------------------
+
+# Shared secret the capture agent must present on POST /api/ingest/orders.
+# Empty => ingest is disabled (fail closed): the endpoint returns 503 and no
+# external process can write into the depth store.
+INGEST_TOKEN = _get("SHOPALBI_INGEST_TOKEN", "")
+
+# Captured order books older than this (hours) are treated as stale: excluded
+# from depth reads and eligible for pruning. Depth is only as fresh as the last
+# time a market window was actually opened in-game, so keep this generous.
+DEPTH_MAX_AGE_HOURS = _get_float("SHOPALBI_DEPTH_MAX_AGE_HOURS", 24.0)
+
+# Hard retention: orders older than this (hours) are deleted on ingest so the
+# table cannot grow without bound for markets no one visits anymore.
+DEPTH_PRUNE_AGE_HOURS = _get_float("SHOPALBI_DEPTH_PRUNE_AGE_HOURS", 168.0)
+
+# Max books accepted in a single ingest POST (protects against a runaway agent).
+INGEST_MAX_BOOKS = _get_int("SHOPALBI_INGEST_MAX_BOOKS", 5000)
