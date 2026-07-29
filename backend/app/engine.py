@@ -1,102 +1,156 @@
 """The analytical core.
 
 Two jobs:
-  1. Refresh: pull the catalog, current prices and daily history into SQLite.
-  2. Serve: turn stored data into (a) per-city average tables over a time
-     window and (b) a ranked list of city -> Black Market flips with honest
-     profit figures, sell-through velocity and a reliability score.
+  1. Refresh — pull the catalog, current prices and daily history into SQLite,
+     then rebuild the derived tables (`agg`, `bm_offer`).
+  2. Serve — turn stored data into flips, a city ranking, a budget plan and the
+     per-city average-price table.
 
-Profit model for an instant flip (buy from a city sell order, carry to
-Caerleon, sell into the Black Market buy order):
+=============================================================================
+PROFIT MODEL
+=============================================================================
+The canonical Black Market flip is instant on both legs:
 
-    cost    = city_sell_price_min                       # what you pay
-    revenue = bm_buy_price_max * (1 - SALES_TAX)         # what you keep, 4% premium
+    buy from a city sell order  ->  carry to Caerleon  ->  "Sell" into a BM bid
+
+Neither leg creates a market order, so the 2.5% setup fee does not apply; the
+only deduction is the sales tax (4% with Premium). Verified against the Albion
+wiki Marketplace/Margin pages.
+
+    cost    = city_sell_price_min * cost_mult      # cost_mult = 1.0 (instant buy)
+    revenue = bm_bid * net                         # net = 1 - 0.04 = 0.96
     profit  = revenue - cost
-    profit% = profit / cost * 100
+    roi     = profit / cost
 
-Historical figures use a volume-weighted average price so a handful of tiny
-trades cannot skew the number.
+Both legs are switchable (`buy_mode` / `sell_mode`) because the alternatives are
+real strategies: placing your own buy order in the city, or parking a sell order
+on the Black Market. Those DO pay the setup fee.
+
+THE QUALITY LADDER. A buy order accepts items of its own quality *or higher*,
+and the Black Market prices each quality independently — so it frequently pays
+more for a lower quality than a higher one. The reachable bid for an item you
+hold at quality Q is therefore max(bid[q] for q <= Q), precomputed into
+`bm_offer`. Matching quality strictly 1:1 (the old behaviour) throws away a
+large share of the genuinely profitable flips.
+
+TRANSPORT RISK. Caerleon sits in a red-zone cluster; a gank costs the whole
+load, not the margin. Expected value of one unit, relative to not trading:
+
+    EV = (1 - p) * revenue - cost          (equivalently: profit - p * revenue)
+
+so the break-even gank rate is p* = 1 - cost/revenue. Buying inside Caerleon
+carries p = 0, which is precisely why its prices are structurally higher.
+=============================================================================
 """
 
 from __future__ import annotations
 
 import logging
-import re
+import math
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from . import config
 from .aodp_client import AodpClient
-from .catalog import build_items
+from .catalog import build_items, tier_label
 from .storage import Storage
 
 log = logging.getLogger("shopalbi.engine")
 
-# Reference points for the reliability score.
-_LIQUIDITY_REF = 20.0   # BM units/day that counts as "very liquid"
+# Live units on both sides of the book that count as "comfortable depth".
+_DEPTH_REF = 25.0
 
 
 # --------------------------------------------------------------------------
-# time helpers
+# small helpers
 # --------------------------------------------------------------------------
-
-def _parse_iso(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    try:
-        txt = s.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(txt)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        return None
-
-
-def _age_hours(s: str | None, now: datetime) -> float | None:
-    dt = _parse_iso(s)
-    if dt is None:
-        return None
-    return (now - dt).total_seconds() / 3600.0
-
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
 
 
-# Localized item names end with the tier word in parentheses, e.g.
-# "Куртка убийцы (магистр)". That duplicates the tier badge and confuses the
-# reader, so we strip it and show a clean "Т7.3" tier.enchant label instead.
-_PAREN_TAIL_RE = re.compile(r"\s*\([^()]*\)\s*$")
+def _parse_iso(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
-def _clean_name(name: str) -> str:
-    return _PAREN_TAIL_RE.sub("", name or "").strip()
+def liquidity_score(daily: float) -> float:
+    """Log-scaled 0..1 liquidity.
+
+    Real Black Market throughput spans four orders of magnitude (a niche T8
+    off-hand does single digits per day; T5_BAG clears ~4,300), so a linear
+    scale against a small reference — the old code divided by 20 — saturates at
+    1.0 for almost everything and carries no information.
+    """
+    floor, ref = config.LIQUIDITY_FLOOR, config.LIQUIDITY_REF
+    if daily <= 0:
+        return 0.0
+    return _clamp(math.log1p(daily / floor) / math.log1p(ref / floor))
 
 
-# Sortable columns for the flip table -> value accessor. Any of these can be
-# sorted ascending or descending from the UI.
-_FLIP_SORT_KEYS = {
-    "opportunity": lambda r: r["opportunity"],
-    "profit": lambda r: r["profit"],
-    "profit_pct": lambda r: r["profit_pct"],
-    "profit_window": lambda r: r["profit_window"],
-    "profit_pct_window": lambda r: r["profit_pct_window"],
-    "reliability": lambda r: r["reliability"],
-    "bm_volume": lambda r: r["bm_daily_volume"],
-    "buy_price": lambda r: r["buy_price"],
-    "bm_buy_now": lambda r: r["bm_buy_now"],
-    "est": lambda r: r["est_sell_hours"] if r["est_sell_hours"] is not None else float("inf"),
-    "buy_city": lambda r: r["buy_city"],
-    "name": lambda r: r["name"].lower(),
-    "tier": lambda r: (r["tier"], r["enchant"]),
-}
+def stability_score(bid: float, vwap: float) -> float:
+    """How consistent the current bid is with the item's own traded history.
+
+    A bid at or below the volume-weighted average is trustworthy (1.0). A bid
+    far above it is the dangerous case — it looks like free silver, and it is
+    usually gone by the time you finish the ride — so the score decays to 0 as
+    the bid approaches BM_MAX_VS_VWAP x VWAP.
+    """
+    if vwap <= 0:
+        return 0.35          # no history to judge against: mildly sceptical
+    ratio = bid / vwap
+    if ratio <= 1.0:
+        return 1.0
+    span = max(1e-6, config.BM_MAX_VS_VWAP - 1.0)
+    return _clamp(1.0 - (ratio - 1.0) / span)
 
 
-def _sort_rows(rows: list[dict], sort: str, direction: str, keymap: dict) -> None:
-    keyfn = keymap.get(sort) or next(iter(keymap.values()))
+def competition_score(bid: float, ask: float) -> float:
+    """Pressure from other players' sell orders parked on the Black Market.
+
+    The BM also carries player `offer` rows. When the cheapest of those sits at
+    or below the NPC bid, those sellers get filled before you do. An ask a
+    comfortable margin above the bid means nobody is queued in front of you.
+    """
+    if ask <= 0 or bid <= 0:
+        return 1.0           # nothing parked in front of us
+    return _clamp((ask - bid) / (0.10 * bid))
+
+
+def freshness_score(buy_age_h: float, bm_age_h: float) -> float:
+    """Weakest-link freshness: a fresh city price cannot rescue a stale BM bid."""
+    f_buy = 1.0 - (buy_age_h / max(1e-6, config.FLIP_MAX_AGE_HOURS))
+    f_bm = 1.0 - (bm_age_h / max(1e-6, config.BM_MAX_AGE_HOURS))
+    return _clamp(min(f_buy, f_bm))
+
+
+# Reliability weights. They sum to 1.0; `depth` is neutral (0.5) when the live
+# order book has nothing for that item rather than punishing it to zero.
+_W_FRESH, _W_LIQ, _W_STAB, _W_DEPTH, _W_COMP = 0.30, 0.22, 0.25, 0.13, 0.10
+
+
+def reliability(fresh: float, liq: float, stab: float, depth: float | None, comp: float) -> int:
+    d = 0.5 if depth is None else depth
+    return int(round(100.0 * (
+        _W_FRESH * fresh + _W_LIQ * liq + _W_STAB * stab + _W_DEPTH * d + _W_COMP * comp
+    )))
+
+
+def city_gank_rate(city: str, base: float) -> float:
+    return _clamp(base * config.CITY_RISK_MULTIPLIER.get(city, 1.0), 0.0, 0.95)
+
+
+def _sort_and_slice(rows: list[dict], sort: str, direction: str, keys: dict, limit: int) -> list[dict]:
+    keyfn = keys.get(sort) or keys[next(iter(keys))]
     rows.sort(key=keyfn, reverse=(direction != "asc"))
+    return rows[:limit] if limit else rows
 
 
 # --------------------------------------------------------------------------
@@ -120,11 +174,13 @@ def refresh_current(storage: Storage, client: AodpClient) -> int:
         ensure_catalog(storage)
         item_ids = storage.all_item_ids()
     log.info("refreshing current prices for %d items", len(item_ids))
+    t0 = time.monotonic()
     rows = client.fetch_prices(item_ids, config.ALL_LOCATIONS, config.QUALITIES)
     n = storage.upsert_current_prices(rows)
+    storage.rebuild_bm_offers()
     storage.set_meta("current_refreshed_at", datetime.now(timezone.utc).isoformat())
     storage.set_meta("current_rows", str(n))
-    log.info("current prices stored: %d rows", n)
+    log.info("current prices stored: %d rows in %.1fs", n, time.monotonic() - t0)
     return n
 
 
@@ -134,336 +190,295 @@ def refresh_history(storage: Storage, client: AodpClient) -> int:
         ensure_catalog(storage)
         item_ids = storage.all_item_ids()
     log.info("refreshing %d-day history for %d items", config.HISTORY_DAYS, len(item_ids))
+    t0 = time.monotonic()
     series = client.fetch_history(
         item_ids, config.ALL_LOCATIONS, config.QUALITIES, config.HISTORY_DAYS, time_scale=24
     )
     n = storage.upsert_history(series)
     cutoff = (datetime.now(timezone.utc).date() - timedelta(days=config.HISTORY_DAYS + 3)).isoformat()
     storage.prune_history(cutoff)
+    storage.rebuild_aggregates()
+    storage.vacuum_analyze()
     storage.set_meta("history_refreshed_at", datetime.now(timezone.utc).isoformat())
     storage.set_meta("history_rows", str(n))
-    log.info("history stored: %d buckets", n)
+    log.info("history stored: %d buckets in %.1fs", n, time.monotonic() - t0)
     return n
 
 
 # --------------------------------------------------------------------------
-# read path with a tiny TTL cache so rapid UI requests don't recompute
+# read path
 # --------------------------------------------------------------------------
 
 class Analytics:
     def __init__(self, storage: Storage):
         self.storage = storage
         self._lock = threading.Lock()
-        self._agg_cache: dict[int, tuple[float, dict]] = {}
-        self._cache_ttl = 45.0
-
-    # window aggregation: (item_id, city, quality) -> {vwap, volume, daily, days}
-    def _aggregate(self, window_days: int) -> dict:
-        with self._lock:
-            hit = self._agg_cache.get(window_days)
-            if hit and (time.monotonic() - hit[0]) < self._cache_ttl:
-                return hit[1]
-        since = (datetime.now(timezone.utc).date() - timedelta(days=window_days)).isoformat()
-        rows = self.storage.history_rows(since)
-        acc: dict[tuple, dict] = {}
-        for r in rows:
-            key = (r["item_id"], r["city"], r["quality"])
-            a = acc.get(key)
-            if a is None:
-                a = {"pv": 0.0, "vol": 0, "days": 0}
-                acc[key] = a
-            cnt = r["item_count"]
-            a["pv"] += r["avg_price"] * cnt
-            a["vol"] += cnt
-            a["days"] += 1
-        result: dict[tuple, dict] = {}
-        for key, a in acc.items():
-            vol = a["vol"]
-            vwap = (a["pv"] / vol) if vol > 0 else 0.0
-            result[key] = {
-                "vwap": round(vwap),
-                "volume": vol,
-                "daily": round(vol / window_days, 2),
-                "days": a["days"],
-            }
-        with self._lock:
-            self._agg_cache[window_days] = (time.monotonic(), result)
-        return result
+        self._flip_cache: dict[tuple, tuple[float, list[dict]]] = {}
+        self._cache_ttl = 40.0
 
     def invalidate(self) -> None:
         with self._lock:
-            self._agg_cache.clear()
+            self._flip_cache.clear()
 
     # -- status -------------------------------------------------------------
 
     def status(self) -> dict:
         s = self.storage
-        min_seen, _ = self._book_window()
+        min_seen, _ = self._book_window(config.ORDER_MAX_AGE_MINUTES)
+        book = s.order_book_stats(min_seen)
         return {
+            "version": config.VERSION,
             "items": s.item_count(),
             "catalog_refreshed_at": s.get_meta("catalog_refreshed_at"),
             "current_refreshed_at": s.get_meta("current_refreshed_at"),
             "current_rows": int(s.get_meta("current_rows", "0")),
             "history_refreshed_at": s.get_meta("history_refreshed_at"),
             "history_rows": int(s.get_meta("history_rows", "0")),
-            "orderbook_orders": s.order_book_count(min_seen),
-            "orderbook_updated_at": s.get_meta("orderbook_updated_at"),
+            "orderbook": book,
             "orderbook_received": int(s.get_meta("orderbook_received", "0")),
+            "orderbook_updated_at": s.get_meta("orderbook_updated_at"),
+            "refresh_running": s.get_meta("refresh_running", "0") == "1",
             "server": config.API_HOST,
             "sales_tax": config.SALES_TAX,
             "setup_fee": config.SETUP_FEE,
+            "gank_rate": config.DEFAULT_GANK_RATE,
             "windows": config.STAT_WINDOWS,
         }
 
-    # -- per-city average table --------------------------------------------
+    # -- live order book ----------------------------------------------------
 
-    def stats_table(
-        self,
-        window: str,
-        category: str | None = None,
-        tier: int | None = None,
-        quality: int | None = None,
-        search: str | None = None,
-        sort: str = "bm_volume",
-        direction: str = "desc",
-        limit: int = 200,
-        offset: int = 0,
-    ) -> dict:
-        window_days = config.STAT_WINDOWS.get(window, 7)
-        agg = self._aggregate(window_days)
-        meta = self.storage.item_meta_map()
+    def _book_window(self, minutes: int) -> tuple[str, str]:
+        now = datetime.now(timezone.utc)
+        return (now - timedelta(minutes=minutes)).isoformat(), now.isoformat()
 
-        # group by (item_id, quality) -> per-city figures
-        grouped: dict[tuple, dict] = {}
-        for (item_id, city, q), v in agg.items():
-            if item_id not in meta:
-                continue
-            key = (item_id, q)
-            g = grouped.get(key)
-            if g is None:
-                g = {"cities": {}, "bm": None}
-                grouped[key] = g
-            entry = {"avg": v["vwap"], "volume": v["volume"], "daily": v["daily"]}
-            if city == config.BLACK_MARKET:
-                g["bm"] = entry
-            else:
-                g["cities"][city] = entry
+    def _bm_requests(self) -> dict[str, list[list]]:
+        """Live Black Market buy orders per item: [price, amount, quality, age_h].
 
-        search_l = (search or "").strip().lower()
-        rows: list[dict] = []
-        for (item_id, q), g in grouped.items():
-            m = meta[item_id]
-            if category and m["category"] != category:
-                continue
-            if tier and m["tier"] != tier:
-                continue
-            if quality and q != quality:
-                continue
-            display = _clean_name(m["name_ru"] or m["name_en"])
-            if search_l and search_l not in display.lower() and search_l not in item_id.lower():
-                continue
-            bm_vol = g["bm"]["volume"] if g["bm"] else 0
-            bm_avg = g["bm"]["avg"] if g["bm"] else 0
-            best_city = None
-            best_city_avg = None
-            for c, e in g["cities"].items():
-                if e["avg"] > 0 and (best_city_avg is None or e["avg"] < best_city_avg):
-                    best_city_avg = e["avg"]
-                    best_city = c
-            rows.append(
-                {
-                    "item_id": item_id,
-                    "name": display,
-                    "tier": m["tier"],
-                    "tier_label": f"T{m['tier']}",
-                    "tier_ench": f"Т{m['tier']}.{m['enchant']}",
-                    "enchant": m["enchant"],
-                    "quality": q,
-                    "quality_label": config.QUALITY_NAMES.get(q, str(q)),
-                    "category": m["category"],
-                    "category_label": config.CATEGORY_NAMES.get(m["category"], m["category"]),
-                    "cities": g["cities"],
-                    "bm_avg": bm_avg,
-                    "bm_volume": bm_vol,
-                    "bm_daily": g["bm"]["daily"] if g["bm"] else 0,
-                    "cheapest_city": best_city,
-                    "cheapest_city_avg": best_city_avg or 0,
-                }
-            )
+        Grouped by item (not by quality) because the quality ladder lets one
+        order be filled from several held qualities; keeping a single shared
+        pool per item is what stops us double-counting the same NPC order.
+        """
+        min_seen, now = self._book_window(config.BM_ORDER_MAX_AGE_MINUTES)
+        rows = self.storage.live_book("request", min_seen, now, city=config.BLACK_MARKET)
+        out: dict[str, list[list]] = defaultdict(list)
+        now_dt = datetime.now(timezone.utc)
+        for r in rows:
+            seen = _parse_iso(r["seen_at"])
+            age = (now_dt - seen).total_seconds() / 3600.0 if seen else 99.0
+            out[r["item_id"]].append([r["price"], r["amount"], r["quality"], age])
+        for lst in out.values():
+            lst.sort(key=lambda x: -x[0])
+        return out
 
-        if sort and sort.startswith("city:"):
-            _c = sort[5:]
-            keyfn = lambda r: r["cities"].get(_c, {}).get("avg", 0)
-        else:
-            _stat_keys = {
-                "bm_volume": lambda r: r["bm_volume"],
-                "bm_avg": lambda r: r["bm_avg"],
-                "cheapest": lambda r: r["cheapest_city_avg"],
-                "name": lambda r: r["name"].lower(),
-                "tier": lambda r: (r["tier"], r["enchant"]),
-            }
-            keyfn = _stat_keys.get(sort, _stat_keys["bm_volume"])
-        rows.sort(key=keyfn, reverse=(direction != "asc"))
+    def _city_offers(self, city: str | None = None) -> dict[tuple, list[list]]:
+        """Live sell offers per (city, item): [price, amount, quality]."""
+        min_seen, now = self._book_window(config.ORDER_MAX_AGE_MINUTES)
+        rows = self.storage.live_book("offer", min_seen, now, city=city)
+        out: dict[tuple, list[list]] = defaultdict(list)
+        for r in rows:
+            if r["city"] == config.BLACK_MARKET:
+                continue
+            out[(r["city"], r["item_id"])].append([r["price"], r["amount"], r["quality"]])
+        for lst in out.values():
+            lst.sort(key=lambda x: x[0])
+        return out
 
-        total = len(rows)
-        page = rows[offset: offset + limit]
-        return {
-            "window": window,
-            "window_days": window_days,
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "sort": sort,
-            "direction": direction,
-            "cities": config.ROYAL_CITIES,
-            "rows": page,
-        }
+    @staticmethod
+    def _depth_units(offers: list[list], requests: list[list], quality: int) -> tuple[int, int]:
+        """(city units offered at quality<=... , BM units demanded) for a quality."""
+        city_units = sum(a for _p, a, q in offers if q == quality)
+        bm_units = sum(a for _p, a, q, _age in requests if q <= quality)
+        return city_units, bm_units
 
     # -- flip finder --------------------------------------------------------
 
-    def _flip_candidates(
+    def _candidates(
         self,
         window: str,
+        buy_mode: str,
+        sell_mode: str,
         min_profit: int,
+        min_profit_pct: float,
         min_bm_volume: float,
+        gank_rate: float,
         category: str | None,
         tier: int | None,
+        enchant: int | None,
         quality: int | None,
         search: str | None,
+        buy_cities: list[str] | None = None,
+        use_depth: bool = True,
     ) -> list[dict]:
-        """Every profitable (item, quality, source city -> Black Market) flip,
-        one row per source city. Prices are fetched once here; both the flip
-        table and the city ranking are derived from this list."""
-        now = datetime.now(timezone.utc)
-        window_days = config.STAT_WINDOWS.get(window, 7)
-        agg = self._aggregate(window_days)
-        meta = self.storage.item_meta_map()
-        current = self.storage.current_prices()
+        cities = buy_cities or list(config.BUY_CITIES)
+        cache_key = (window, buy_mode, sell_mode, min_profit, min_profit_pct, min_bm_volume,
+                     round(gank_rate, 4), category, tier, enchant, quality, search or "",
+                     tuple(cities), use_depth)
+        with self._lock:
+            hit = self._flip_cache.get(cache_key)
+            if hit and (time.monotonic() - hit[0]) < self._cache_ttl:
+                return hit[1]
 
-        bm_now: dict[tuple, dict] = {}
-        city_sell: dict[tuple, list[dict]] = {}
-        for r in current:
-            key = (r["item_id"], r["quality"])
-            if r["city"] == config.BLACK_MARKET:
-                if r["buy_price_max"] > 0:
-                    bm_now[key] = r
-            elif r["sell_price_min"] > 0:
-                city_sell.setdefault(key, []).append(r)
+        net = config.net_factor(sell_mode)
+        cost_mult = config.cost_factor(buy_mode)
 
-        tax = config.SALES_TAX
-        fee = config.SETUP_FEE
-        search_l = (search or "").strip().lower()
-        cands: list[dict] = []
+        rows = self.storage.flip_rows(
+            window=window, net=net, cost_mult=cost_mult,
+            min_profit=min_profit, min_profit_pct=min_profit_pct,
+            min_bm_daily=min_bm_volume, buy_cities=cities,
+            category=category, tier=tier, enchant=enchant, quality=quality, search=search,
+        )
 
-        for key, bm in bm_now.items():
-            item_id, q = key
-            m = meta.get(item_id)
-            if not m:
+        bm_req = self._bm_requests() if use_depth else {}
+        offers = self._city_offers() if use_depth else {}
+
+        out: list[dict] = []
+        for r in rows:
+            cost = float(r["buy_cost"])
+            revenue = float(r["bm_price"]) * net
+            profit = revenue - cost
+            if cost <= 0:
                 continue
-            if category and m["category"] != category:
-                continue
-            if tier and m["tier"] != tier:
-                continue
-            if quality and q != quality:
-                continue
+            roi = profit / cost
 
-            bm_age = _age_hours(bm["buy_price_max_date"], now)
-            if bm_age is None or bm_age > config.FLIP_MAX_AGE_HOURS:
-                continue
+            bm_daily = float(r["bm_daily"])
+            fresh = freshness_score(float(r["buy_age_h"]), float(r["bm_age_h"]))
+            liq = liquidity_score(bm_daily)
+            stab = stability_score(float(r["bm_price"]), float(r["bm_vwap"]))
+            comp = competition_score(float(r["bm_price"]), float(r["bm_ask"]))
 
-            bm_hist = agg.get((item_id, config.BLACK_MARKET, q))
-            bm_ref_price = bm_hist["vwap"] if bm_hist else 0
-            bm_daily = bm_hist["daily"] if bm_hist else 0.0
-            if bm_daily < min_bm_volume:
-                continue
+            qty_city = qty_bm = None
+            depth = None
+            if use_depth:
+                o = offers.get((r["buy_city"], r["item_id"]))
+                q_req = bm_req.get(r["item_id"])
+                if o or q_req:
+                    qty_city, qty_bm = self._depth_units(o or [], q_req or [], r["quality"])
+                    depth = _clamp(min(qty_city, qty_bm) / _DEPTH_REF)
+            score = reliability(fresh, liq, stab, depth, comp)
 
-            display = _clean_name(m["name_ru"] or m["name_en"])
-            tier_ench = f"Т{m['tier']}.{m['enchant']}"
-            if search_l and search_l not in display.lower() and search_l not in item_id.lower():
-                continue
+            p = city_gank_rate(r["buy_city"], gank_rate)
+            ev_unit = (1.0 - p) * revenue - cost
+            breakeven_p = 1.0 - (cost / revenue) if revenue > 0 else 0.0
 
-            net = 1.0 - tax - fee  # Black Market sale net of sales tax + setup fee
-            bm_price_now = bm["buy_price_max"]
-            revenue_now = bm_price_now * net
-            revenue_ref = bm_ref_price * net
-            est_hours = round(24.0 / bm_daily, 2) if bm_daily > 0 else None
-            liquidity = _clamp(bm_daily / _LIQUIDITY_REF)
+            # window-average profit: the same flip priced off the BM's own
+            # volume-weighted average instead of the momentary bid. If this is
+            # much worse than the live number, the live number is a spike.
+            profit_vwap = float(r["bm_vwap"]) * net - cost
+            trend = 0.0
+            if r["bm_vwap"] and r["bm_vwap_day"]:
+                trend = (float(r["bm_vwap_day"]) / float(r["bm_vwap"]) - 1.0) * 100.0
 
-            for r in city_sell.get(key, []):
-                if r["city"] not in config.BUY_CITIES:
-                    continue
-                age = _age_hours(r["sell_price_min_date"], now)
-                if age is None or age > config.FLIP_MAX_AGE_HOURS:
-                    continue
-                cost = r["sell_price_min"]   # buying from an existing sell order has no fee
-                if cost <= 0:
-                    continue
-                profit_now = revenue_now - cost
-                if profit_now < min_profit:
-                    continue
-                profit_pct_now = profit_now / cost * 100.0
-                profit_ref = revenue_ref - cost
-                profit_pct_ref = profit_ref / cost * 100.0
+            available = None
+            if qty_city is not None and qty_bm is not None:
+                available = min(qty_city, qty_bm)
 
-                fresh = _clamp(1.0 - (max(bm_age, age) / config.FLIP_MAX_AGE_HOURS))
-                stability = _clamp(profit_ref / profit_now) if profit_now > 0 else 0.0
-                score = round(100.0 * (0.40 * fresh + 0.30 * liquidity + 0.30 * stability))
+            out.append({
+                "item_id": r["item_id"],
+                "name": r["name_disp"],
+                "tier": r["tier"],
+                "enchant": r["enchant"],
+                "tier_ench": tier_label(r["tier"], r["enchant"]),
+                "quality": r["quality"],
+                "quality_label": config.QUALITY_NAMES.get(r["quality"], str(r["quality"])),
+                "category": r["category"],
+                "category_label": config.CATEGORY_NAMES.get(r["category"], r["category"]),
+                "buy_city": r["buy_city"],
+                "buy_price": r["buy_price_raw"],
+                "buy_cost": round(cost),
+                "buy_age_h": round(float(r["buy_age_h"]), 1),
+                "bm_price": r["bm_price"],
+                "bm_quality": r["bm_quality"],
+                "bm_quality_label": config.QUALITY_NAMES.get(r["bm_quality"], str(r["bm_quality"])),
+                "quality_upsell": r["bm_quality"] < r["quality"],
+                "bm_age_h": round(float(r["bm_age_h"]), 1),
+                "bm_vwap": r["bm_vwap"],
+                "bm_ask": r["bm_ask"],
+                "bm_daily_volume": round(bm_daily, 1),
+                "bm_days": r["bm_days"],
+                "bm_trend_pct": round(trend, 1),
+                "profit": round(profit),
+                "profit_pct": round(roi * 100.0, 1),
+                "profit_vwap": round(profit_vwap),
+                "profit_pct_vwap": round(profit_vwap / cost * 100.0, 1),
+                "ev_unit": round(ev_unit),
+                "ev_pct": round(ev_unit / cost * 100.0, 1),
+                "gank_rate": round(p * 100.0, 1),
+                "breakeven_gank_pct": round(breakeven_p * 100.0, 1),
+                "spike": float(r["bm_vwap"]) > 0 and float(r["bm_price"]) > config.BM_MAX_VS_VWAP * float(r["bm_vwap"]),
+                "avail_city": qty_city,
+                "avail_bm": qty_bm,
+                "available": available,
+                "est_absorb_h": round(24.0 / bm_daily, 2) if bm_daily > 0 else None,
+                "reliability": score,
+                # Headline composite: expected profit per unit after transport
+                # risk, discounted by how much we trust the numbers.
+                "opportunity": round(ev_unit * score / 100.0),
+                # Daily opportunity: what the item is worth if you work it all
+                # day, bounded by what the Black Market can actually absorb.
+                "throughput": round(ev_unit * score / 100.0 * min(bm_daily, 200.0)),
+            })
 
-                cands.append(
-                    {
-                        "item_id": item_id,
-                        "name": display,
-                        "tier": m["tier"],
-                        "tier_label": f"T{m['tier']}",
-                        "tier_ench": tier_ench,
-                        "enchant": m["enchant"],
-                        "quality": q,
-                        "quality_label": config.QUALITY_NAMES.get(q, str(q)),
-                        "category": m["category"],
-                        "category_label": config.CATEGORY_NAMES.get(m["category"], m["category"]),
-                        "buy_city": r["city"],
-                        "buy_price": r["sell_price_min"],
-                        "buy_age_h": round(age, 1),
-                        "bm_buy_now": bm_price_now,
-                        "bm_age_h": round(bm_age, 1),
-                        "bm_avg_window": bm_ref_price,
-                        "bm_daily_volume": round(bm_daily, 1),
-                        "est_sell_hours": est_hours,
-                        "profit": round(profit_now),
-                        "profit_pct": round(profit_pct_now, 1),
-                        "profit_window": round(profit_ref),
-                        "profit_pct_window": round(profit_pct_ref, 1),
-                        "reliability": score,
-                        # composite "worth it" score: expected profit discounted
-                        # by how trustworthy/liquid the flip is (profit x score).
-                        "opportunity": round(profit_now * score / 100.0),
-                    }
-                )
-        return cands
+        with self._lock:
+            self._flip_cache[cache_key] = (time.monotonic(), out)
+            if len(self._flip_cache) > 24:
+                oldest = min(self._flip_cache, key=lambda k: self._flip_cache[k][0])
+                self._flip_cache.pop(oldest, None)
+        return out
+
+    _FLIP_KEYS = {
+        "opportunity": lambda r: r["opportunity"],
+        "throughput": lambda r: r["throughput"],
+        "profit": lambda r: r["profit"],
+        "profit_pct": lambda r: r["profit_pct"],
+        "ev_unit": lambda r: r["ev_unit"],
+        "ev_pct": lambda r: r["ev_pct"],
+        "profit_vwap": lambda r: r["profit_vwap"],
+        "reliability": lambda r: r["reliability"],
+        "bm_volume": lambda r: r["bm_daily_volume"],
+        "bm_trend": lambda r: r["bm_trend_pct"],
+        "buy_price": lambda r: r["buy_price"],
+        "bm_price": lambda r: r["bm_price"],
+        "available": lambda r: (-1 if r["available"] is None else r["available"]),
+        "absorb": lambda r: (r["est_absorb_h"] if r["est_absorb_h"] is not None else float("inf")),
+        "buy_city": lambda r: r["buy_city"],
+        "name": lambda r: r["name"].lower(),
+        "tier": lambda r: (r["tier"], r["enchant"]),
+        "quality": lambda r: r["quality"],
+    }
 
     def flips(
         self,
         window: str = "week",
+        buy_mode: str | None = None,
+        sell_mode: str | None = None,
         min_profit: int | None = None,
+        min_profit_pct: float | None = None,
         min_bm_volume: float | None = None,
+        gank_rate: float | None = None,
         category: str | None = None,
         tier: int | None = None,
+        enchant: int | None = None,
         quality: int | None = None,
         search: str | None = None,
         buy_city: str | None = None,
         sort: str = "opportunity",
         direction: str = "desc",
-        limit: int = 200,
+        limit: int = 300,
     ) -> dict:
+        buy_mode = buy_mode or config.DEFAULT_BUY_MODE
+        sell_mode = sell_mode or config.DEFAULT_SELL_MODE
         min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
-        min_bm_volume = (
-            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
-        )
-        cands = self._flip_candidates(
-            window, min_profit, min_bm_volume, category, tier, quality, search
+        min_profit_pct = config.DEFAULT_MIN_PROFIT_PCT if min_profit_pct is None else min_profit_pct
+        min_bm_volume = config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
+        gank = config.DEFAULT_GANK_RATE if gank_rate is None else gank_rate
+
+        cands = self._candidates(
+            window, buy_mode, sell_mode, min_profit, min_profit_pct, min_bm_volume,
+            gank, category, tier, enchant, quality, search,
+            buy_cities=[buy_city] if buy_city else None,
         )
         if buy_city:
-            rows = [c for c in cands if c["buy_city"] == buy_city]
+            rows = list(cands)
         else:
             # collapse to the single best source city per (item, quality)
             best: dict[tuple, dict] = {}
@@ -474,44 +489,84 @@ class Analytics:
                     best[k] = c
             rows = list(best.values())
 
-        _sort_rows(rows, sort, direction, _FLIP_SORT_KEYS)
+        if not quality:
+            rows = self._merge_identical_qualities(rows)
 
+        total = len(rows)
+        page = _sort_and_slice(rows, sort, direction, self._FLIP_KEYS, limit)
         return {
             "window": window,
             "window_days": config.STAT_WINDOWS.get(window, 7),
+            "buy_mode": buy_mode,
+            "sell_mode": sell_mode,
+            "net": round(config.net_factor(sell_mode), 4),
+            "cost_mult": round(config.cost_factor(buy_mode), 4),
             "sales_tax": config.SALES_TAX,
+            "setup_fee": config.SETUP_FEE,
+            "gank_rate": gank,
             "min_profit": min_profit,
+            "min_profit_pct": min_profit_pct,
             "min_bm_volume": min_bm_volume,
             "buy_city": buy_city,
             "sort": sort,
             "direction": direction,
-            "total": len(rows),
-            "rows": rows[:limit],
+            "total": total,
+            "rows": page,
         }
 
-    def city_ranking(
-        self,
-        window: str = "week",
-        min_profit: int | None = None,
-        min_bm_volume: float | None = None,
-        category: str | None = None,
-        tier: int | None = None,
-        quality: int | None = None,
-        search: str | None = None,
-        top_n: int = 100,
-    ) -> dict:
-        """Rank royal cities as a buy base. Each city's best `top_n` flips
-        (by opportunity = profit x reliability) are summed, so the city that
-        offers the most realizable profit across items ranks first."""
-        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
-        min_bm_volume = (
-            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
-        )
-        cands = self._flip_candidates(
-            window, min_profit, min_bm_volume, category, tier, quality, search
-        )
-        from collections import defaultdict
+    @staticmethod
+    def _merge_identical_qualities(rows: list[dict]) -> list[dict]:
+        """Fold rows that describe the exact same trade at different qualities.
 
+        When a city's cheapest listing sits at the same price for q3 and q4, and
+        both sell into the same Black Market order, the two rows carry identical
+        numbers and only pad the table. We keep the lowest quality (cheaper and
+        more plentiful in practice) and list the others in `also_qualities`, so
+        nothing is hidden — you can still see that q4 works at the same price.
+        """
+        merged: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r["item_id"], r["buy_city"], r["buy_price"], r["bm_price"], r["bm_quality"])
+            cur = merged.get(key)
+            if cur is None:
+                r = dict(r)
+                r["also_qualities"] = []
+                merged[key] = r
+                continue
+            lo, hi = (r, cur) if r["quality"] < cur["quality"] else (cur, r)
+            if lo is not cur:
+                lo = dict(lo)
+                lo["also_qualities"] = cur["also_qualities"]
+                merged[key] = lo
+            if hi["quality"] not in lo["also_qualities"]:
+                lo["also_qualities"].append(hi["quality"])
+            lo["also_qualities"].sort()
+        return list(merged.values())
+
+    # -- city ranking -------------------------------------------------------
+
+    def city_ranking(self, top_n: int = 100, **kw) -> dict:
+        kw.pop("buy_city", None)
+        kw.pop("sort", None)
+        kw.pop("direction", None)
+        kw.pop("limit", None)
+        window = kw.pop("window", "week")
+        buy_mode = kw.pop("buy_mode", None) or config.DEFAULT_BUY_MODE
+        sell_mode = kw.pop("sell_mode", None) or config.DEFAULT_SELL_MODE
+        min_profit = kw.pop("min_profit", None)
+        min_profit_pct = kw.pop("min_profit_pct", None)
+        min_bm_volume = kw.pop("min_bm_volume", None)
+        gank = kw.pop("gank_rate", None)
+        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
+        min_profit_pct = config.DEFAULT_MIN_PROFIT_PCT if min_profit_pct is None else min_profit_pct
+        min_bm_volume = config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
+        gank = config.DEFAULT_GANK_RATE if gank is None else gank
+
+        cands = self._candidates(
+            window, buy_mode, sell_mode, min_profit, min_profit_pct, min_bm_volume, gank,
+            kw.get("category"), kw.get("tier"), kw.get("enchant"),
+            kw.get("quality"), kw.get("search"),
+        )
         buckets: dict[str, list[dict]] = defaultdict(list)
         for c in cands:
             buckets[c["buy_city"]].append(c)
@@ -520,264 +575,393 @@ class Analytics:
         for city, lst in buckets.items():
             lst.sort(key=lambda x: x["opportunity"], reverse=True)
             top = lst[:top_n]
-            n = len(top)
+            n = len(top) or 1
             best = top[0] if top else None
-            out.append(
-                {
-                    "city": city,
-                    "flips_count": len(lst),
-                    "score": sum(x["opportunity"] for x in top),
-                    "top_profit_sum": sum(x["profit"] for x in top),
-                    "avg_profit_pct": round(sum(x["profit_pct"] for x in top) / n, 1) if n else 0.0,
-                    "avg_reliability": round(sum(x["reliability"] for x in top) / n) if n else 0,
-                    "best_item": best["name"] if best else "",
-                    "best_profit": best["profit"] if best else 0,
-                    "best_profit_pct": best["profit_pct"] if best else 0.0,
-                }
-            )
+            out.append({
+                "city": city,
+                "flips_count": len(lst),
+                "score": sum(x["opportunity"] for x in top),
+                "ev_sum": sum(x["ev_unit"] for x in top),
+                "profit_sum": sum(x["profit"] for x in top),
+                "avg_profit_pct": round(sum(x["profit_pct"] for x in top) / n, 1),
+                "avg_ev_pct": round(sum(x["ev_pct"] for x in top) / n, 1),
+                "avg_reliability": round(sum(x["reliability"] for x in top) / n),
+                "gank_rate": round(city_gank_rate(city, gank) * 100.0, 1),
+                "trip_hours": config.CITY_TRIP_HOURS.get(city, 0.55),
+                "best_item": best["name"] if best else "",
+                "best_tier_ench": best["tier_ench"] if best else "",
+                "best_profit": best["profit"] if best else 0,
+                "best_profit_pct": best["profit_pct"] if best else 0.0,
+            })
         out.sort(key=lambda r: r["score"], reverse=True)
         return {
             "window": window,
             "window_days": config.STAT_WINDOWS.get(window, 7),
+            "gank_rate": gank,
             "top_n": top_n,
             "total": len(out),
             "rows": out,
         }
 
-    # -- budget recommender -------------------------------------------------
+    # -- average price table ------------------------------------------------
 
-    def recommend(
+    _STAT_KEYS = {
+        "bm_volume": lambda r: r["bm_volume"],
+        "bm_daily": lambda r: r["bm_daily"],
+        "bm_avg": lambda r: r["bm_avg"],
+        "bm_now": lambda r: r["bm_now"],
+        "spread_pct": lambda r: r["spread_pct"],
+        "cheapest": lambda r: r["cheapest_avg"],
+        "name": lambda r: r["name"].lower(),
+        "tier": lambda r: (r["tier"], r["enchant"]),
+        "quality": lambda r: r["quality"],
+    }
+
+    def stats_table(
+        self,
+        window: str,
+        category: str | None = None,
+        tier: int | None = None,
+        enchant: int | None = None,
+        quality: int | None = None,
+        search: str | None = None,
+        sort: str = "bm_volume",
+        direction: str = "desc",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict:
+        rows = self.storage.stats_rows(window, category, tier, enchant, quality, search)
+        grouped: dict[tuple, dict] = {}
+        for r in rows:
+            key = (r["item_id"], r["quality"])
+            g = grouped.get(key)
+            if g is None:
+                g = {
+                    "item_id": r["item_id"], "name": r["name_disp"], "tier": r["tier"],
+                    "enchant": r["enchant"], "tier_ench": tier_label(r["tier"], r["enchant"]),
+                    "quality": r["quality"],
+                    "quality_label": config.QUALITY_NAMES.get(r["quality"], str(r["quality"])),
+                    "category": r["category"],
+                    "category_label": config.CATEGORY_NAMES.get(r["category"], r["category"]),
+                    "cities": {}, "bm_avg": 0, "bm_volume": 0, "bm_daily": 0.0, "bm_now": 0,
+                }
+                grouped[key] = g
+            entry = {
+                "avg": r["vwap"], "volume": r["volume"], "daily": round(r["daily"], 1),
+                "now": r["sell_now"],
+            }
+            if r["city"] == config.BLACK_MARKET:
+                g["bm_avg"] = r["vwap"]
+                g["bm_volume"] = r["volume"]
+                g["bm_daily"] = round(r["daily"], 1)
+                g["bm_now"] = r["buy_now"]
+            else:
+                g["cities"][r["city"]] = entry
+
+        net = config.net_factor()
+        out: list[dict] = []
+        for g in grouped.values():
+            cheapest_city, cheapest_avg = None, None
+            for c, e in g["cities"].items():
+                if c in config.EXCLUDED_BUY_CITIES:
+                    continue
+                if e["avg"] > 0 and (cheapest_avg is None or e["avg"] < cheapest_avg):
+                    cheapest_avg, cheapest_city = e["avg"], c
+            g["cheapest_city"] = cheapest_city
+            g["cheapest_avg"] = cheapest_avg or 0
+            # Historical edge: BM average vs the cheapest city average, net of tax.
+            g["spread_pct"] = (
+                round((g["bm_avg"] * net - cheapest_avg) / cheapest_avg * 100.0, 1)
+                if cheapest_avg else 0.0
+            )
+            out.append(g)
+
+        if sort.startswith("city:"):
+            c = sort[5:]
+            keyfn = lambda r: r["cities"].get(c, {}).get("avg", 0)
+            out.sort(key=keyfn, reverse=(direction != "asc"))
+        else:
+            _sort_and_slice(out, sort, direction, self._STAT_KEYS, 0)
+
+        total = len(out)
+        return {
+            "window": window,
+            "window_days": config.STAT_WINDOWS.get(window, 7),
+            "total": total, "offset": offset, "limit": limit,
+            "sort": sort, "direction": direction,
+            "cities": config.ROYAL_CITIES,
+            "net": round(net, 4),
+            "rows": out[offset: offset + limit],
+        }
+
+    # -- budget planner -----------------------------------------------------
+
+    def plan(
         self,
         budget: int,
         city: str | None = None,
         window: str = "week",
+        buy_mode: str | None = None,
+        sell_mode: str | None = None,
         min_profit: int | None = None,
+        min_profit_pct: float | None = None,
         min_bm_volume: float | None = None,
+        gank_rate: float | None = None,
         category: str | None = None,
         tier: int | None = None,
+        enchant: int | None = None,
         quality: int | None = None,
         search: str | None = None,
     ) -> dict:
-        """Budget shopping plan built on LIVE order-book depth from the NATS feed.
-        Real sell offers (cheapest first) are matched against the Black Market's
-        real buy orders (highest first), bounded by the actual amounts on both
-        sides and the budget — so recommended quantities can never exceed what
-        physically exists. If a city has no live depth yet, we fall back to a
-        hard-capped estimate from the REST snapshot."""
-        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
-        min_bm_volume = (
-            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
-        )
-        budget = max(0, int(budget or 0))
-        window_days = config.STAT_WINDOWS.get(window, 7)
-        agg = self._aggregate(window_days)
-        meta = self.storage.item_meta_map()
+        """Shopping plan for a budget: which city, which items, how many.
 
-        bm_req = self._book_grouped("request", config.BLACK_MARKET)
-        min_seen, _now = self._book_window()
-        book_orders = self.storage.order_book_count(min_seen)
+        Quantities come from the live order book wherever we have it — real sell
+        offers matched against real Black Market buy orders, bounded by the
+        actual amounts on both sides — so the plan cannot suggest buying more
+        units than physically exist. Where there is no live depth the quantity
+        is capped hard (NODEPTH_CAP and a share of one day's BM absorption)
+        and flagged as an estimate.
+        """
+        buy_mode = buy_mode or config.DEFAULT_BUY_MODE
+        sell_mode = sell_mode or config.DEFAULT_SELL_MODE
+        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
+        min_profit_pct = config.DEFAULT_MIN_PROFIT_PCT if min_profit_pct is None else min_profit_pct
+        min_bm_volume = config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
+        gank = config.DEFAULT_GANK_RATE if gank_rate is None else gank_rate
+        budget = max(0, int(budget or 0))
+
+        net = config.net_factor(sell_mode)
+        cost_mult = config.cost_factor(buy_mode)
+
+        cands = self._candidates(
+            window, buy_mode, sell_mode, min_profit, min_profit_pct, min_bm_volume, gank,
+            category, tier, enchant, quality, search,
+            buy_cities=[city] if city else None,
+        )
+        bm_req = self._bm_requests()
+        by_city: dict[str, list[dict]] = defaultdict(list)
+        for c in cands:
+            by_city[c["buy_city"]].append(c)
 
         cities = [city] if city else list(config.BUY_CITIES)
         plans = []
         for cy in cities:
-            plan = self._plan_city(cy, budget, window, meta, agg, bm_req,
-                                   min_profit, min_bm_volume, category, tier, quality, search)
-            plan["city"] = cy
-            plans.append(plan)
-        plans.sort(key=lambda p: p["expected_profit"], reverse=True)
+            offers = self._city_offers(cy)
+            plans.append(self._plan_city(cy, budget, by_city.get(cy, []), offers, bm_req,
+                                         net, cost_mult, gank))
+        plans.sort(key=lambda p: p["ev_profit"], reverse=True)
         best = plans[0] if plans else None
+
+        min_seen, _ = self._book_window(config.ORDER_MAX_AGE_MINUTES)
+        book = self.storage.order_book_stats(min_seen)
         return {
-            "window": window,
-            "budget": budget,
-            "sales_tax": config.SALES_TAX,
-            "setup_fee": config.SETUP_FEE,
+            "window": window, "budget": budget,
+            "buy_mode": buy_mode, "sell_mode": sell_mode,
+            "net": round(net, 4), "cost_mult": round(cost_mult, 4),
+            "sales_tax": config.SALES_TAX, "setup_fee": config.SETUP_FEE,
+            "gank_rate": gank,
             "requested_city": city,
-            "orderbook_orders": book_orders,
+            "orderbook": book,
             "has_depth": bool(bm_req),
             "city": best["city"] if best else None,
             "best": best,
             "cities": [
-                {k: p.get(k) for k in
-                 ("city", "expected_profit", "spent", "leftover", "roi_pct", "items_count", "source")}
+                {k: p.get(k) for k in ("city", "ev_profit", "profit", "spent", "leftover",
+                                       "roi_pct", "items_count", "source", "gank_rate")}
                 for p in plans
             ],
         }
 
-    def _book_window(self) -> tuple[str, str]:
-        now = datetime.now(timezone.utc)
-        return (now - timedelta(minutes=config.ORDER_MAX_AGE_MINUTES)).isoformat(), now.isoformat()
-
-    def _book_grouped(self, side: str, city: str | None = None) -> dict:
-        min_seen, now = self._book_window()
-        rows = self.storage.live_book(side, min_seen, now, city)
-        g: dict[tuple, list[list[int]]] = {}
-        for r in rows:
-            g.setdefault((r["item_id"], r["quality"]), []).append([r["price"], r["amount"]])
-        return g
-
-    def _plan_city(self, city, budget, window, meta, agg, bm_req,
-                   min_profit, min_bm_volume, category, tier, quality, search) -> dict:
-        offers = self._book_grouped("offer", city)
-        net = 1.0 - config.SALES_TAX - config.SETUP_FEE
-        search_l = (search or "").strip().lower()
-
-        # depth path: live sell offers here AND live Black Market buy orders
-        if offers and bm_req:
-            fills: list[dict] = []
-            for key, off_list in offers.items():
-                if key not in bm_req:
-                    continue
-                item_id, q = key
-                m = meta.get(item_id)
-                if not m:
-                    continue
-                if category and m["category"] != category:
-                    continue
-                if tier and m["tier"] != tier:
-                    continue
-                if quality and q != quality:
-                    continue
-                bm_hist = agg.get((item_id, config.BLACK_MARKET, q))
-                bm_daily = bm_hist["daily"] if bm_hist else 0.0
-                if bm_daily < min_bm_volume:
-                    continue
-                display = _clean_name(m["name_ru"] or m["name_en"])
-                if search_l and search_l not in display.lower() and search_l not in item_id.lower():
-                    continue
-                # fresh copies so we never mutate the shared bm_req lists
-                offs = sorted(([p, a] for p, a in off_list), key=lambda x: x[0])
-                reqs = sorted(([p, a] for p, a in bm_req[key]), key=lambda x: x[0], reverse=True)
-                i = j = 0
-                while i < len(offs) and j < len(reqs):
-                    buy_p, sell_p = offs[i][0], reqs[j][0]
-                    margin = sell_p * net - buy_p
-                    if margin <= 0:
-                        break  # cheapest remaining offer no longer beats best BM buy
-                    lot = min(offs[i][1], reqs[j][1])
-                    if lot > 0:
-                        fills.append({
-                            "key": key, "item_id": item_id, "q": q, "m": m, "name": display,
-                            "buy_price": buy_p, "sell_price": sell_p, "qty": lot,
-                            "unit_profit": margin, "bm_daily": bm_daily,
-                        })
-                        offs[i][1] -= lot
-                        reqs[j][1] -= lot
-                    if offs[i][1] <= 0:
-                        i += 1
-                    if j < len(reqs) and reqs[j][1] <= 0:
-                        j += 1
-            if fills:
-                return self._greedy_fill(fills, budget, agg, net)
-
-        # no live depth here -> hard-capped estimate from the REST snapshot
-        return self._estimate_plan(city, budget, window, min_profit, min_bm_volume,
-                                   category, tier, quality, search, net)
-
-    def _greedy_fill(self, fills, budget, agg, net) -> dict:
-        # total profitably-buyable amount per item (full depth, ignoring budget)
-        avail: dict[tuple, int] = {}
-        for f in fills:
-            avail[f["key"]] = avail.get(f["key"], 0) + f["qty"]
-        # spend budget on the most silver-efficient lots first
-        fills.sort(key=lambda f: f["unit_profit"] / f["buy_price"] if f["buy_price"] else 0.0, reverse=True)
-        remaining = float(budget)
-        aggd: dict[tuple, dict] = {}
-        for f in fills:
-            bp = f["buy_price"]
-            if bp <= 0 or remaining < bp:
-                continue
-            qty = min(f["qty"], int(remaining // bp))
-            if qty < 1:
-                continue
-            it = aggd.get(f["key"])
-            if it is None:
-                m = f["m"]
-                bm_hist = agg.get((f["item_id"], config.BLACK_MARKET, f["q"]))
-                it = {
-                    "item_id": f["item_id"], "name": f["name"],
-                    "tier_ench": f"Т{m['tier']}.{m['enchant']}",
-                    "quality": f["q"], "quality_label": config.QUALITY_NAMES.get(f["q"], str(f["q"])),
-                    "category_label": config.CATEGORY_NAMES.get(m["category"], m["category"]),
-                    "qty": 0, "cost": 0.0, "profit": 0.0,
-                    "min_price": bp, "bm_top": f["sell_price"],
-                    "bm_daily": f["bm_daily"], "bm_weekly": bm_hist["vwap"] if bm_hist else 0,
-                }
-                aggd[f["key"]] = it
-            it["qty"] += qty
-            it["cost"] += qty * bp
-            it["profit"] += f["unit_profit"] * qty
-            it["min_price"] = min(it["min_price"], bp)
-            it["bm_top"] = max(it["bm_top"], f["sell_price"])
-            remaining -= qty * bp
-
-        items = []
-        for key, it in aggd.items():
-            qty = it["qty"]
-            cost = it["cost"]
-            if qty < 1:
-                continue
-            avg = cost / qty
-            liq = _clamp(it["bm_daily"] / _LIQUIDITY_REF)
-            cur_net = it["bm_top"] * net - avg
-            wk_net = it["bm_weekly"] * net - avg
-            stab = _clamp(wk_net / cur_net) if cur_net > 0 else 0.0
-            score = round(100.0 * (0.40 + 0.30 * liq + 0.30 * stab))
-            items.append({
-                "item_id": it["item_id"], "name": it["name"], "tier_ench": it["tier_ench"],
-                "quality": it["quality"], "quality_label": it["quality_label"],
-                "category_label": it["category_label"],
-                "qty": qty, "unit_price": it["min_price"], "avg_price": round(avg),
-                "total_cost": round(cost), "bm_buy_now": it["bm_top"],
-                "unit_profit": round(it["profit"] / qty), "total_profit": round(it["profit"]),
-                "profit_pct": round(it["profit"] / cost * 100, 1) if cost else 0.0,
-                "bm_daily_volume": round(it["bm_daily"], 1), "reliability": score,
-                "available": avail.get(key, qty), "source": "live",
-            })
-        items.sort(key=lambda x: x["total_profit"], reverse=True)
-        spent = sum(x["total_cost"] for x in items)
-        profit = sum(x["total_profit"] for x in items)
-        return {
-            "expected_profit": round(profit), "spent": round(spent),
-            "leftover": round(budget - spent),
-            "roi_pct": round(profit / spent * 100, 1) if spent else 0.0,
-            "items_count": len(items), "items": items, "source": "live",
-        }
-
-    def _estimate_plan(self, city, budget, window, min_profit, min_bm_volume,
-                       category, tier, quality, search, net) -> dict:
-        cands = [c for c in self._flip_candidates(window, min_profit, min_bm_volume,
-                                                  category, tier, quality, search)
-                 if c["buy_city"] == city]
-        cands.sort(key=lambda c: c["profit"] / c["buy_price"] if c["buy_price"] else 0.0, reverse=True)
-        cap = config.RECOMMEND_NODEPTH_CAP
-        remaining = float(budget)
-        items = []
+    def _plan_city(self, city, budget, cands, offers, bm_req, net, cost_mult, gank) -> dict:
+        """Build one city's plan. Returns aggregated per-item buy instructions."""
+        p = city_gank_rate(city, gank)
+        by_item: dict[str, list[dict]] = defaultdict(list)
         for c in cands:
-            price = c["buy_price"]
-            if price <= 0 or remaining < price:
+            by_item[c["item_id"]].append(c)
+
+        # ---- 1. enumerate fillable lots -----------------------------------
+        lots: list[dict] = []
+        for item_id, group in by_item.items():
+            reqs = [list(r) for r in bm_req.get(item_id, [])]
+            offs = offers.get((city, item_id))
+            meta_by_q = {g["quality"]: g for g in group}
+            live_lots: list[dict] = []
+
+            if reqs and offs:
+                # Real depth. One shared pool of BM buy orders per item, so the
+                # same NPC order can never be sold into twice even though
+                # several held qualities are eligible for it (quality ladder).
+                for price, amount, held_q in sorted(offs, key=lambda x: x[0]):
+                    meta = meta_by_q.get(held_q)
+                    if meta is None:
+                        continue
+                    left = amount
+                    while left > 0:
+                        pick = next(
+                            (r for r in reqs if r[2] <= held_q and r[1] > 0
+                             and r[0] * net - price * cost_mult > 0),
+                            None,
+                        )
+                        if pick is None:
+                            break
+                        take = min(left, pick[1])
+                        live_lots.append({
+                            "item_id": item_id, "meta": meta, "qty": take,
+                            "unit_cost": price * cost_mult, "unit_rev": pick[0] * net,
+                            "buy_price": price, "bm_price": pick[0],
+                            "bm_quality": pick[2], "source": "live",
+                        })
+                        pick[1] -= take
+                        left -= take
+
+            if live_lots:
+                lots.extend(live_lots)
                 continue
-            qty = min(cap, int(remaining // price))
-            if qty < 1:
-                continue
-            cost = price * qty
-            total = c["profit"] * qty
+
+            # No usable live depth for this item -> hard-capped REST estimate.
+            # (Falling back rather than dropping the item matters: the live feed
+            # only carries markets players actually opened, so a thin book is
+            # missing data, not evidence that the flip is bad.)
+            for meta in group:
+                cap = config.RECOMMEND_NODEPTH_CAP
+                if meta["bm_daily_volume"] > 0:
+                    cap = min(cap, max(1, int(meta["bm_daily_volume"] * config.RECOMMEND_VOLUME_CAPTURE)))
+                lots.append({
+                    "item_id": item_id, "meta": meta, "qty": cap,
+                    "unit_cost": float(meta["buy_cost"]),
+                    "unit_rev": float(meta["bm_price"]) * net,
+                    "buy_price": meta["buy_price"], "bm_price": meta["bm_price"],
+                    "bm_quality": meta["bm_quality"], "source": "est",
+                })
+
+        # ---- 2. greedy budget fill ----------------------------------------
+        # Rank by risk-adjusted return per silver spent, weighted by how much we
+        # trust the quote: capital is the scarce resource, not item count.
+        def efficiency(lot):
+            c = lot["unit_cost"]
+            if c <= 0:
+                return 0.0
+            ev = (1.0 - p) * lot["unit_rev"] - c
+            return ev / c * (lot["meta"]["reliability"] / 100.0)
+
+        lots = [l for l in lots if l["unit_cost"] > 0 and efficiency(l) > 0]
+        lots.sort(key=efficiency, reverse=True)
+        remaining = float(budget)
+        spent_on: dict[str, float] = defaultdict(float)
+        picked: dict[tuple, dict] = {}
+        lot_left = [l["qty"] for l in lots]
+
+        def take(i: int, lot: dict, qty: int) -> None:
+            nonlocal remaining
+            uc = lot["unit_cost"]
+            key = (lot["item_id"], lot["meta"]["quality"])
+            agg = picked.get(key)
+            if agg is None:
+                agg = {
+                    "meta": lot["meta"], "qty": 0, "cost": 0.0, "revenue": 0.0,
+                    "min_price": lot["buy_price"], "max_price": lot["buy_price"],
+                    "bm_top": lot["bm_price"], "bm_quality": lot["bm_quality"],
+                    "source": lot["source"],
+                }
+                picked[key] = agg
+            agg["qty"] += qty
+            agg["cost"] += qty * uc
+            agg["revenue"] += qty * lot["unit_rev"]
+            agg["min_price"] = min(agg["min_price"], lot["buy_price"])
+            agg["max_price"] = max(agg["max_price"], lot["buy_price"])
+            agg["bm_top"] = max(agg["bm_top"], lot["bm_price"])
+            remaining -= qty * uc
+            spent_on[lot["item_id"]] += qty * uc
+            lot_left[i] -= qty
+
+        # Pass 1 — diversified: no single item may eat more than a share of the
+        # budget, so one hot item cannot become the whole plan.
+        # Pass 2 — mop-up: spend whatever is left on the best remaining lots
+        # without the share cap. Without this second pass a budget smaller than
+        # (unit price / share) buys literally nothing.
+        for enforce_cap in (True, False):
+            item_cap = budget * config.RECOMMEND_MAX_ITEM_SHARE if (budget and enforce_cap) else 0.0
+            for i, lot in enumerate(lots):
+                if lot_left[i] < 1:
+                    continue
+                uc = lot["unit_cost"]
+                if remaining < uc:
+                    continue
+                key = (lot["item_id"], lot["meta"]["quality"])
+                if len(picked) >= config.RECOMMEND_MAX_ITEMS and key not in picked:
+                    continue
+                room = remaining
+                if item_cap:
+                    room = min(room, max(0.0, item_cap - spent_on[lot["item_id"]]))
+                qty = min(lot_left[i], int(room // uc))
+                if qty >= 1:
+                    take(i, lot, qty)
+
+        # ---- 3. shape the output ------------------------------------------
+        items = []
+        for (item_id, q), a in picked.items():
+            m = a["meta"]
+            qty, cost, revenue = a["qty"], a["cost"], a["revenue"]
+            profit = revenue - cost
+            ev = (1.0 - p) * revenue - cost
+            daily = m["bm_daily_volume"]
             items.append({
-                "item_id": c["item_id"], "name": c["name"], "tier_ench": c["tier_ench"],
-                "quality": c["quality"], "quality_label": c["quality_label"],
-                "category_label": c["category_label"],
-                "qty": qty, "unit_price": price, "avg_price": price,
-                "total_cost": round(cost), "bm_buy_now": c["bm_buy_now"],
-                "unit_profit": c["profit"], "total_profit": round(total),
-                "profit_pct": c["profit_pct"], "bm_daily_volume": c["bm_daily_volume"],
-                "reliability": c["reliability"], "available": None, "source": "est",
+                "item_id": item_id, "name": m["name"], "tier_ench": m["tier_ench"],
+                "quality": q, "quality_label": m["quality_label"],
+                "category_label": m["category_label"],
+                "qty": qty,
+                "unit_price": a["min_price"],
+                "max_price": a["max_price"],
+                # avg_price = average market price of the lots you clear;
+                # avg_cost  = what you actually pay per unit (incl. order fee).
+                "avg_price": round(cost / qty / cost_mult) if qty else 0,
+                "avg_cost": round(cost / qty) if qty else 0,
+                "total_cost": round(cost),
+                "bm_buy_now": a["bm_top"],
+                "bm_quality": a["bm_quality"],
+                "bm_quality_label": config.QUALITY_NAMES.get(a["bm_quality"], str(a["bm_quality"])),
+                "quality_upsell": a["bm_quality"] < q,
+                "unit_profit": round(profit / qty) if qty else 0,
+                "total_profit": round(profit),
+                "ev_profit": round(ev),
+                "profit_pct": round(profit / cost * 100.0, 1) if cost else 0.0,
+                "bm_daily_volume": daily,
+                "absorb_h": round(24.0 * qty / daily, 1) if daily > 0 else None,
+                "reliability": m["reliability"],
+                "available": m.get("available"),
+                "bm_trend_pct": m["bm_trend_pct"],
+                "spike": m["spike"],
+                "source": a["source"],
             })
-            remaining -= cost
-        items.sort(key=lambda x: x["total_profit"], reverse=True)
+        items.sort(key=lambda x: x["ev_profit"], reverse=True)
+
         spent = sum(x["total_cost"] for x in items)
         profit = sum(x["total_profit"] for x in items)
+        ev = sum(x["ev_profit"] for x in items)
+        absorb = max((x["absorb_h"] or 0) for x in items) if items else 0
+        # Wall clock for one run = shopping + ride. Absorption is reported
+        # separately because you are not standing still while the BM eats the
+        # load; folding it in here would make long-tail items look worthless.
+        trip = config.CITY_TRIP_HOURS.get(city, 0.55) + config.LOAD_OVERHEAD_HOURS
+        live_share = (
+            round(sum(1 for x in items if x["source"] == "live") / len(items) * 100)
+            if items else 0
+        )
         return {
-            "expected_profit": round(profit), "spent": round(spent),
+            "city": city,
+            "items": items,
+            "items_count": len(items),
+            "spent": round(spent),
             "leftover": round(budget - spent),
-            "roi_pct": round(profit / spent * 100, 1) if spent else 0.0,
-            "items_count": len(items), "items": items, "source": "est",
+            "profit": round(profit),
+            "ev_profit": round(ev),
+            "roi_pct": round(profit / spent * 100.0, 1) if spent else 0.0,
+            "ev_roi_pct": round(ev / spent * 100.0, 1) if spent else 0.0,
+            "gank_rate": round(p * 100.0, 1),
+            "risk_cost": round(profit - ev),
+            "trip_hours": round(trip, 2),
+            "profit_per_hour": round(ev / trip) if trip else 0,
+            "absorb_h": round(absorb, 1),
+            "live_share_pct": live_share,
+            "source": "live" if live_share >= 50 else "est",
         }

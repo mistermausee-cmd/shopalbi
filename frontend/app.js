@@ -1,222 +1,329 @@
 'use strict';
 
-// ---- helpers --------------------------------------------------------------
+/* shopalbi frontend — vanilla JS, no build step.
+ *
+ * Four views share one table renderer. Each view declares its columns; a column
+ * may be server-sorted (`key` matches an API sort key) or client-sorted (it also
+ * provides `value`). The previous release had a bug where the plan tab read the
+ * cities tab's sort state, so clicking its headers did nothing — sort state is
+ * now always keyed by the active view.
+ */
 
-const $ = (sel) => document.querySelector(sel);
+// ---------------------------------------------------------------- helpers
+
+const $ = (s) => document.querySelector(s);
 const nf = new Intl.NumberFormat('ru-RU');
-const fmt = (n) => (n === null || n === undefined || n === '' ? '—' : nf.format(Math.round(n)));
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const CITY_SHORT = {
-  'Bridgewatch': 'Бриджуотч',
-  'Fort Sterling': 'Форт-Стерлинг',
-  'Lymhurst': 'Лимхёрст',
-  'Martlock': 'Мартлок',
-  'Thetford': 'Тетфорд',
-  'Caerleon': 'Карлеон',
-  'Brecilien': 'Бресилиан',
-  'Black Market': 'Чёрный рынок',
+const fmt = (n) => (n === null || n === undefined || n === '' ? '—' : nf.format(Math.round(n)));
+const signed = (n) => (n === null || n === undefined ? '—' : (n >= 0 ? '+' : '') + nf.format(Math.round(n)));
+const pct = (n) => (n === null || n === undefined ? '—' : (n >= 0 ? '+' : '') + n + '%');
+
+function compact(n) {
+  const a = Math.abs(n || 0);
+  if (a >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
+  if (a >= 1e6) return (n / 1e6).toFixed(2) + ' млн';
+  if (a >= 1e4) return Math.round(n / 1e3) + 'k';
+  return fmt(n);
+}
+
+const CITY_RU = {
+  'Bridgewatch': 'Бриджуотч', 'Fort Sterling': 'Форт-Стерлинг', 'Lymhurst': 'Лимхёрст',
+  'Martlock': 'Мартлок', 'Thetford': 'Тетфорд', 'Caerleon': 'Карлеон',
+  'Brecilien': 'Бресилиан', 'Black Market': 'Чёрный рынок',
 };
-const cityName = (c) => CITY_SHORT[c] || c;
+const cityRu = (c) => CITY_RU[c] || c || '—';
+const WIN_RU = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц' };
 
 function timeAgo(iso) {
   if (!iso) return 'нет данных';
-  const diff = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (diff < 60) return 'только что';
-  if (diff < 3600) return `${Math.floor(diff / 60)} мин назад`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)} ч назад`;
-  return `${Math.floor(diff / 86400)} д назад`;
+  const d = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (d < 60) return 'только что';
+  if (d < 3600) return Math.floor(d / 60) + ' мин назад';
+  if (d < 86400) return Math.floor(d / 3600) + ' ч назад';
+  return Math.floor(d / 86400) + ' д назад';
 }
-function estTime(hours) {
-  if (hours === null || hours === undefined) return '—';
-  if (hours < 1) return `~${Math.round(hours * 60)} мин`;
-  if (hours < 48) return `~${hours.toFixed(1)} ч`;
-  return `~${(hours / 24).toFixed(1)} дн`;
+function hours(h) {
+  if (h === null || h === undefined) return '—';
+  if (h < 1) return '~' + Math.round(h * 60) + ' мин';
+  if (h < 48) return '~' + h.toFixed(1) + ' ч';
+  return '~' + (h / 24).toFixed(1) + ' дн';
 }
 function scoreColor(v) {
-  if (v >= 70) return 'var(--green)';
-  if (v >= 45) return 'var(--gold)';
+  if (v >= 68) return 'var(--green)';
+  if (v >= 45) return 'var(--amber)';
   return 'var(--red)';
 }
-function toast(msg, kind = '') {
+function toast(msg, kind) {
   const t = $('#toast');
   t.textContent = msg;
-  t.className = 'toast ' + kind;
+  t.className = 'toast ' + (kind || '');
   t.hidden = false;
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => { t.hidden = true; }, 3500);
+  toast._t = setTimeout(() => { t.hidden = true; }, 4000);
 }
 function debounce(fn, ms) {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
-async function fetchJSON(url, timeoutMs = 25000) {
+async function fetchJSON(url, timeoutMs) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs || 30000);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': 'application/json' } });
+    if (!res.ok) {
+      let detail = 'HTTP ' + res.status;
+      try { const j = await res.json(); if (j.detail) detail = j.detail; } catch (e) { /* ignore */ }
+      throw new Error(detail);
+    }
     return await res.json();
   } finally {
     clearTimeout(timer);
   }
 }
 
-// ---- state ----------------------------------------------------------------
+// ---------------------------------------------------------------- state
 
 const state = {
-  view: 'flips',                 // 'flips' | 'cities' | 'stats'
+  view: 'flips',
   window: 'day',
-  sort: {
-    flips: { key: 'opportunity', dir: 'desc' },
-    stats: { key: 'bm_volume', dir: 'desc' },
-    cities: { key: 'score', dir: 'desc' },
-    recommend: { key: 'total_profit', dir: 'desc' },
-  },
   meta: null,
   cities: [],
-  rows: [],                      // last loaded rows (for client-side sort of the cities tab)
+  rows: [],
+  payload: null,
   loading: false,
+  sort: {
+    flips:  { key: 'opportunity', dir: 'desc' },
+    plan:   { key: 'ev_profit',   dir: 'desc' },
+    cities: { key: 'score',       dir: 'desc' },
+    stats:  { key: 'bm_volume',   dir: 'desc' },
+  },
 };
 
-// columns whose natural first-click direction is ascending (lower = better / text)
-const ASC_FIRST = new Set(['name', 'buy_city', 'city', 'best_item', 'buy_price', 'est', 'cheapest', 'unit_price', 'avg_price']);
+// Columns where the first click should sort ascending (cheaper / sooner / A-Z).
+const ASC_FIRST = new Set(['name', 'buy_city', 'city', 'best_item', 'buy_price',
+  'absorb', 'cheapest', 'unit_price', 'avg_price', 'trip']);
+// Views sorted in the browser (their endpoints return the full set already).
+const CLIENT_SORTED = new Set(['plan', 'cities']);
 
-// ---- cell renderers -------------------------------------------------------
+// ---------------------------------------------------------------- cells
 
-function renderNameCell(r) {
-  const q = `<span class="q-badge q${r.quality}" title="${r.quality_label}"></span>`;
-  return `<div class="item-name">${q}${r.name}</div>` +
-    `<div class="item-sub"><span class="pill tier">${r.tier_ench}</span> ` +
-    `<span class="pill cat">${r.category_label}</span> · ${r.quality_label}</div>`;
+function nameCell(r) {
+  const pills = [`<span class="pill tier">${esc(r.tier_ench)}</span>`];
+  if (r.category_label) pills.push(`<span class="pill cat">${esc(r.category_label)}</span>`);
+  if (r.quality_upsell) {
+    pills.push(`<span class="pill up" title="Чёрный рынок платит больше за ордер более низкого качества (q${r.bm_quality}), а он принимает предметы своего качества и выше. Продавать нужно в закладке q${r.bm_quality}.">→ q${r.bm_quality}</span>`);
+  }
+  if (r.spike) {
+    pills.push('<span class="pill spike" title="Текущая ставка ЧР сильно выше средней за период — вероятен разовый скачок, который исчезнет, пока ты едешь.">скачок</span>');
+  }
+  if (r.source === 'live') pills.push('<span class="pill live" title="Количество посчитано по реальному живому стакану">live</span>');
+  if (r.source === 'est') pills.push('<span class="pill est" title="Живой глубины по этому предмету нет — количество ограничено сверху">оценка</span>');
+  let qtxt = esc(r.quality_label);
+  if (r.also_qualities && r.also_qualities.length) {
+    qtxt += ` <span class="dimc" title="По этой же цене доступно и это качество — сделка та же.">(также q${r.also_qualities.join(', q')})</span>`;
+  }
+  return `<div class="item-name" title="${esc(r.item_id)}"><span class="q q${r.quality}" title="${esc(r.quality_label)}"></span>${esc(r.name)}</div>`
+       + `<div class="item-sub">${pills.join('')} <span>${qtxt}</span></div>`;
 }
-function profitCls(v) { return v >= 0 ? 'profit-pos' : 'profit-neg'; }
-function signed(v) { return `${v >= 0 ? '+' : ''}${fmt(v)}`; }
-function renderScoreCell(v) {
-  const col = scoreColor(v);
-  return `<div class="score"><span class="score-bar"><i style="width:${Math.max(0, v)}%;background:${col}"></i></span>` +
-    `<span class="score-val" style="color:${col}">${v}</span></div>`;
+const money = (v, cls) => `<span class="num ${cls || ''}">${fmt(v)}</span>`;
+const profitCell = (v) => `<span class="num ${v >= 0 ? 'pos' : 'neg'}">${signed(v)}</span>`;
+const pctCell = (v) => `<span class="num ${v >= 0 ? 'pos' : 'neg'}">${pct(v)}</span>`;
+function scoreCell(v) {
+  const c = scoreColor(v);
+  return `<div class="score"><span class="score-bar"><i style="width:${Math.max(0, Math.min(100, v))}%;background:${c}"></i></span>`
+       + `<span class="score-val" style="color:${c}">${v}</span></div>`;
 }
 
-// ---- column definitions ---------------------------------------------------
+// ---------------------------------------------------------------- columns
 
-function flipColumns() {
+const H = {
+  opportunity: 'Итоговая оценка = ожидаемая прибыль с единицы после риска ганка × надёжность/100. Именно по ней сортируется список по умолчанию.',
+  throughput: 'Оценка × сколько штук в день реально съедает Чёрный рынок. Показывает, что стоит возить потоком, а не разово.',
+  profit: 'Чистая прибыль с 1 шт: ставка ЧР × 0.96 − цена покупки. 0.96 = минус налог 4% с Premium. Сбора за размещение нет: и покупка из ордера продажи, и мгновенная продажа в ордер выкупа его не платят.',
+  ev: 'Ожидаемая ценность с учётом риска потерять груз: (1 − p) × выручка − затраты, где p — шанс ганка по дороге. Ползунок риска в «⚙ Модель».',
+  breakeven: 'При каком проценте ганков этот флип выходит в ноль: 1 − затраты/выручка. Чем больше — тем безопаснее.',
+  bmPrice: 'Текущая ставка выкупа Чёрного рынка. Стрелка «→ qN» значит, что продавать надо в ордер качества N (он принимает твоё качество и выше и платит больше).',
+  vwap: 'Средневзвешенная по объёму цена ЧР за выбранный период. Если текущая ставка сильно выше — это скачок, а не норма.',
+  vol: 'Сколько единиц Чёрный рынок реально выкупил в среднем за день по истории сделок.',
+  avail: 'Реально доступно по живому стакану: минимум из «сколько продают в городе» и «сколько готов купить ЧР». Прочерк — живых данных по предмету пока нет.',
+  rel: 'Надёжность 0–100: свежесть цен (30%), ликвидность ЧР (22%), совпадение ставки с историей (25%), живая глубина (13%), конкуренция чужих sell-ордеров на ЧР (10%).',
+  absorb: 'Сколько примерно времени ЧР съедает 1 шт при текущем обороте (24ч / шт в день). Мгновенная продажа в ордер происходит сразу — это оценка глубины спроса.',
+  trend: 'Куда идёт цена ЧР: средняя за сутки против средней за выбранный период.',
+  ask: 'Самый дешёвый чужой sell-ордер, уже стоящий на ЧР. Если он ниже ставки выкупа — этих продавцов обслужат раньше тебя.',
+};
+
+function colsFlips() {
   return [
-    { key: 'name', label: 'Предмет', left: true, render: renderNameCell },
-    { key: 'opportunity', label: 'Выгодность', hint: 'Совокупная оценка: прибыль × надёжность',
-      render: (r) => `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.opportunity)}</span>` },
+    { key: 'name', label: 'Предмет', left: true, stick: true, render: nameCell,
+      csv: (r) => `${r.name} ${r.tier_ench} q${r.quality}` },
+    { key: 'opportunity', label: 'Оценка', hint: H.opportunity,
+      render: (r) => `<span class="num big" style="color:var(--gold)">${fmt(r.opportunity)}</span>`,
+      csv: (r) => r.opportunity },
     { key: 'buy_city', label: 'Купить в', left: true,
-      render: (r) => `<span class="city-tag">${cityName(r.buy_city)}</span>` },
-    { key: 'buy_price', label: 'Цена покупки', render: (r) => `<span class="num">${fmt(r.buy_price)}</span>` },
-    { key: 'bm_buy_now', label: 'Выкуп ЧР', render: (r) => `<span class="num">${fmt(r.bm_buy_now)}</span>` },
-    { key: 'profit', label: 'Прибыль',
-      render: (r) => `<span class="num ${profitCls(r.profit)}">${signed(r.profit)}</span>` },
-    { key: 'profit_pct', label: 'Прибыль %',
-      render: (r) => `<span class="num ${profitCls(r.profit_pct)}">${r.profit_pct >= 0 ? '+' : ''}${r.profit_pct}%</span>` },
-    { key: 'profit_window', label: 'Прибыль (за период)',
-      render: (r) => `<span class="num ${profitCls(r.profit_window)}">${signed(r.profit_window)}</span>` +
-        ` <span class="pct cell-dim">(${r.profit_pct_window}%)</span>` },
-    { key: 'bm_volume', label: 'ЧР шт/день', render: (r) => `<span class="num cell-dim">${r.bm_daily_volume}</span>` },
-    { key: 'est', label: '~Время выкупа', render: (r) => `<span class="cell-dim">${estTime(r.est_sell_hours)}</span>` },
-    { key: 'reliability', label: 'Надёжность', render: (r) => renderScoreCell(r.reliability) },
+      render: (r) => `<span class="city">${esc(cityRu(r.buy_city))}</span>`
+        + `<span class="sub2">риск ${r.gank_rate}% · ${hours(r.buy_age_h)} назад</span>`,
+      csv: (r) => cityRu(r.buy_city) },
+    { key: 'buy_price', label: 'Цена закупки', render: (r) => money(r.buy_price), csv: (r) => r.buy_price },
+    { key: 'bm_price', label: 'Ставка ЧР', hint: H.bmPrice,
+      render: (r) => money(r.bm_price, 'big') + `<span class="sub2">${hours(r.bm_age_h)} назад</span>`,
+      csv: (r) => r.bm_price },
+    { key: 'profit', label: 'Прибыль/шт', hint: H.profit, render: (r) => profitCell(r.profit), csv: (r) => r.profit },
+    { key: 'profit_pct', label: '%', hint: H.profit, render: (r) => pctCell(r.profit_pct), csv: (r) => r.profit_pct },
+    { key: 'ev_unit', label: 'С учётом риска', hint: H.ev,
+      render: (r) => profitCell(r.ev_unit) + `<span class="sub2">б/у при ${r.breakeven_gank_pct}%</span>`,
+      csv: (r) => r.ev_unit },
+    { key: 'profit_vwap', label: 'По средней ЧР', hint: H.vwap,
+      render: (r) => profitCell(r.profit_vwap) + `<span class="sub2">${fmt(r.bm_vwap)}</span>`,
+      csv: (r) => r.profit_vwap },
+    { key: 'bm_volume', label: 'ЧР шт/день', hint: H.vol,
+      render: (r) => `<span class="num dimc">${r.bm_daily_volume}</span>`, csv: (r) => r.bm_daily_volume },
+    { key: 'available', label: 'Доступно', hint: H.avail,
+      render: (r) => r.available == null
+        ? '<span class="dimc">—</span>'
+        : `<span class="num">${fmt(r.available)}</span><span class="sub2">город ${fmt(r.avail_city)} / ЧР ${fmt(r.avail_bm)}</span>`,
+      csv: (r) => (r.available == null ? '' : r.available) },
+    { key: 'bm_trend', label: 'Тренд', hint: H.trend,
+      render: (r) => `<span class="num ${r.bm_trend_pct >= 0 ? 'pos' : 'neg'}">${pct(r.bm_trend_pct)}</span>`,
+      csv: (r) => r.bm_trend_pct },
+    { key: 'absorb', label: 'Выкуп 1 шт', hint: H.absorb,
+      render: (r) => `<span class="dimc">${hours(r.est_absorb_h)}</span>`, csv: (r) => r.est_absorb_h },
+    { key: 'reliability', label: 'Надёжность', hint: H.rel,
+      render: (r) => scoreCell(r.reliability), csv: (r) => r.reliability },
+    { key: 'throughput', label: 'Потенциал/день', hint: H.throughput,
+      render: (r) => `<span class="num dimc">${compact(r.throughput)}</span>`, csv: (r) => r.throughput },
   ];
 }
 
-function statsColumns() {
+function colsPlan() {
+  return [
+    { key: 'name', label: 'Предмет', left: true, stick: true, value: (r) => r.name, render: nameCell,
+      csv: (r) => `${r.name} ${r.tier_ench} q${r.quality}` },
+    { key: 'qty', label: 'Купить, шт', value: (r) => r.qty,
+      hint: 'Сколько штук брать. При наличии живого стакана количество ограничено реальными ордерами: и предложением города, и спросом ЧР.',
+      render: (r) => `<span class="num big" style="color:var(--gold)">${fmt(r.qty)}</span>`
+        + (r.available != null ? `<span class="sub2">из ${fmt(r.available)} доступных</span>` : ''),
+      csv: (r) => r.qty },
+    { key: 'unit_price', label: 'Цена от', value: (r) => r.unit_price,
+      hint: 'Самый дешёвый лот. Дальше цена растёт — смотри «средняя».',
+      render: (r) => money(r.unit_price) + (r.max_price > r.unit_price ? `<span class="sub2">до ${fmt(r.max_price)}</span>` : ''),
+      csv: (r) => r.unit_price },
+    { key: 'avg_price', label: 'Средняя', value: (r) => r.avg_price,
+      hint: 'Средняя цена за штуку, если скупить всё рекомендованное количество по возрастающим лотам.',
+      render: (r) => money(r.avg_price, 'big'), csv: (r) => r.avg_price },
+    { key: 'bm_buy_now', label: 'Ставка ЧР', value: (r) => r.bm_buy_now, hint: H.bmPrice,
+      render: (r) => `<span class="num" style="color:var(--gold)">${fmt(r.bm_buy_now)}</span>`
+        + (r.quality_upsell ? `<span class="sub2">в ордер q${r.bm_quality}</span>` : ''),
+      csv: (r) => r.bm_buy_now },
+    { key: 'total_cost', label: 'Затраты', value: (r) => r.total_cost,
+      render: (r) => money(r.total_cost), csv: (r) => r.total_cost },
+    { key: 'total_profit', label: 'Прибыль', value: (r) => r.total_profit,
+      render: (r) => profitCell(r.total_profit), csv: (r) => r.total_profit },
+    { key: 'ev_profit', label: 'С учётом риска', value: (r) => r.ev_profit, hint: H.ev,
+      render: (r) => profitCell(r.ev_profit), csv: (r) => r.ev_profit },
+    { key: 'profit_pct', label: '%', value: (r) => r.profit_pct,
+      render: (r) => pctCell(r.profit_pct), csv: (r) => r.profit_pct },
+    { key: 'bm_daily_volume', label: 'ЧР шт/день', value: (r) => r.bm_daily_volume, hint: H.vol,
+      render: (r) => `<span class="num dimc">${r.bm_daily_volume}</span>`, csv: (r) => r.bm_daily_volume },
+    { key: 'absorb_h', label: 'Выкупят за', value: (r) => (r.absorb_h == null ? Infinity : r.absorb_h),
+      hint: 'Сколько времени ЧР будет съедать именно это количество при текущем обороте.',
+      render: (r) => `<span class="dimc">${hours(r.absorb_h)}</span>`, csv: (r) => r.absorb_h },
+    { key: 'reliability', label: 'Надёжность', value: (r) => r.reliability, hint: H.rel,
+      render: (r) => scoreCell(r.reliability), csv: (r) => r.reliability },
+  ];
+}
+
+function colsCities() {
+  return [
+    { key: 'city', label: 'Город', left: true, stick: true, value: (r) => cityRu(r.city),
+      render: (r) => `<div class="item-name"><span class="city" style="font-size:14px">${esc(cityRu(r.city))}</span></div>`
+        + `<div class="item-sub"><span class="pill ${r.gank_rate > 0 ? 'risk' : 'safe'}" title="Шанс потерять груз по дороге в Карлеон">риск ${r.gank_rate}%</span>`
+        + `<span>рейс ~${r.trip_hours} ч</span></div>`,
+      csv: (r) => cityRu(r.city) },
+    { key: 'score', label: 'Сумма оценок', value: (r) => r.score,
+      hint: 'Сумма итоговых оценок по лучшим 100 флипам города. Показывает, где в целом больше выгодных вещей, а не одна удачная позиция.',
+      render: (r) => `<span class="num big" style="color:var(--gold)">${compact(r.score)}</span>`, csv: (r) => r.score },
+    { key: 'flips_count', label: 'Флипов', value: (r) => r.flips_count,
+      render: (r) => `<span class="num">${fmt(r.flips_count)}</span>`, csv: (r) => r.flips_count },
+    { key: 'profit_sum', label: 'Прибыль топ-100', value: (r) => r.profit_sum,
+      hint: 'Суммарная прибыль с 1 шт по каждому из лучших 100 флипов города.',
+      render: (r) => profitCell(r.profit_sum), csv: (r) => r.profit_sum },
+    { key: 'ev_sum', label: 'То же с риском', value: (r) => r.ev_sum, hint: H.ev,
+      render: (r) => profitCell(r.ev_sum), csv: (r) => r.ev_sum },
+    { key: 'avg_profit_pct', label: 'Средний %', value: (r) => r.avg_profit_pct,
+      render: (r) => pctCell(r.avg_profit_pct), csv: (r) => r.avg_profit_pct },
+    { key: 'avg_ev_pct', label: 'Средний % с риском', value: (r) => r.avg_ev_pct,
+      render: (r) => pctCell(r.avg_ev_pct), csv: (r) => r.avg_ev_pct },
+    { key: 'avg_reliability', label: 'Ср. надёжность', value: (r) => r.avg_reliability,
+      render: (r) => scoreCell(r.avg_reliability), csv: (r) => r.avg_reliability },
+    { key: 'best_item', label: 'Лучшая позиция', left: true, value: (r) => r.best_item,
+      render: (r) => r.best_item
+        ? `<div class="item-name">${esc(r.best_item)}</div><div class="item-sub">`
+          + `<span class="pill tier">${esc(r.best_tier_ench)}</span>`
+          + `<span class="pos">${signed(r.best_profit)} (${r.best_profit_pct}%)</span></div>`
+        : '<span class="dimc">—</span>',
+      csv: (r) => r.best_item },
+  ];
+}
+
+function colsStats() {
   const cols = [
-    { key: 'name', label: 'Предмет', left: true, render: renderNameCell },
-    { key: 'bm_avg', label: 'ЧР средняя', render: (r) => `<span class="num">${fmt(r.bm_avg)}</span>` },
-    { key: 'bm_volume', label: 'ЧР объём', render: (r) => `<span class="num cell-dim">${fmt(r.bm_volume)}</span>` },
+    { key: 'name', label: 'Предмет', left: true, stick: true, render: nameCell,
+      csv: (r) => `${r.name} ${r.tier_ench} q${r.quality}` },
+    { key: 'bm_avg', label: 'ЧР средняя', hint: H.vwap,
+      render: (r) => money(r.bm_avg, 'big'), csv: (r) => r.bm_avg },
+    { key: 'bm_now', label: 'ЧР сейчас', hint: 'Текущая ставка выкупа ЧР для этого качества.',
+      render: (r) => `<span class="num" style="color:var(--gold)">${fmt(r.bm_now)}</span>`, csv: (r) => r.bm_now },
+    { key: 'bm_volume', label: 'Оборот ЧР', hint: 'Всего единиц выкуплено за период.',
+      render: (r) => `<span class="num dimc">${fmt(r.bm_volume)}</span><span class="sub2">${r.bm_daily}/день</span>`,
+      csv: (r) => r.bm_volume },
+    { key: 'spread_pct', label: 'Спред', hint: 'Историческая наценка: средняя ЧР × 0.96 против средней цены в самом дешёвом городе. Скрининг, а не готовая сделка.',
+      render: (r) => pctCell(r.spread_pct), csv: (r) => r.spread_pct },
   ];
   for (const c of state.cities) {
     cols.push({
-      key: 'city:' + c, label: cityName(c),
+      key: 'city:' + c, label: cityRu(c),
       render: (r) => {
         const e = r.cities[c];
-        return e && e.avg ? `<span class="num">${fmt(e.avg)}</span>` : '<span class="cell-dim">—</span>';
+        if (!e || !e.avg) return '<span class="dimc">—</span>';
+        const cheapest = r.cheapest_city === c;
+        return `<span class="num" ${cheapest ? 'style="color:var(--green);font-weight:700"' : ''}>${fmt(e.avg)}</span>`
+             + `<span class="sub2">${e.daily}/день</span>`;
       },
+      csv: (r) => (r.cities[c] ? r.cities[c].avg : ''),
     });
   }
   cols.push({
     key: 'cheapest', label: 'Дешевле всего', left: true,
     render: (r) => r.cheapest_city
-      ? `<span class="city-tag">${cityName(r.cheapest_city)}</span> <span class="num cell-dim">${fmt(r.cheapest_city_avg)}</span>`
-      : '<span class="cell-dim">—</span>',
+      ? `<span class="city">${esc(cityRu(r.cheapest_city))}</span> <span class="num dimc">${fmt(r.cheapest_avg)}</span>`
+      : '<span class="dimc">—</span>',
+    csv: (r) => cityRu(r.cheapest_city),
   });
   return cols;
 }
 
-function cityColumns() {
-  return [
-    { key: 'city', label: 'Город закупки', left: true, value: (r) => cityName(r.city),
-      render: (r) => `<span class="city-tag" style="font-size:14px">${cityName(r.city)}</span>` },
-    { key: 'score', label: 'Выгодность (сумма)', value: (r) => r.score, hint: 'Сумма выгодности по лучшим флипам города',
-      render: (r) => `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.score)}</span>` },
-    { key: 'flips_count', label: 'Флипов доступно', value: (r) => r.flips_count,
-      render: (r) => `<span class="num">${fmt(r.flips_count)}</span>` },
-    { key: 'top_profit_sum', label: 'Прибыль топ-100', value: (r) => r.top_profit_sum,
-      render: (r) => `<span class="num profit-pos">${signed(r.top_profit_sum)}</span>` },
-    { key: 'avg_profit_pct', label: 'Средний %', value: (r) => r.avg_profit_pct,
-      render: (r) => `<span class="num">${r.avg_profit_pct}%</span>` },
-    { key: 'avg_reliability', label: 'Ср. надёжность', value: (r) => r.avg_reliability,
-      render: (r) => renderScoreCell(r.avg_reliability) },
-    { key: 'best_item', label: 'Лучший предмет', left: true, value: (r) => r.best_item,
-      render: (r) => `<div class="item-name">${r.best_item || '—'}</div>` +
-        (r.best_item ? `<div class="item-sub profit-pos">${signed(r.best_profit)} (${r.best_profit_pct}%)</div>` : '') },
-  ];
-}
-
-function recommendColumns() {
-  return [
-    { key: 'name', label: 'Предмет', left: true, value: (r) => r.name, render: renderNameCell },
-    { key: 'qty', label: 'Купить, шт', value: (r) => r.qty,
-      render: (r) => {
-        const tag = r.source === 'live'
-          ? '<span class="src src-live" title="Реальная глубина стакана">live</span>'
-          : '<span class="src src-est" title="Оценка — живого стакана пока нет">оценка</span>';
-        return `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.qty)}</span> ${tag}`;
-      } },
-    { key: 'available', label: 'Есть на рынке', value: (r) => (r.available == null ? -1 : r.available),
-      hint: 'Сколько всего выгодно купить по реальным ордерам',
-      render: (r) => r.available == null ? '<span class="cell-dim">—</span>' : `<span class="num cell-dim">${fmt(r.available)}</span>` },
-    { key: 'unit_price', label: 'Мин. цена', value: (r) => r.unit_price,
-      render: (r) => `<span class="num">${fmt(r.unit_price)}</span>` },
-    { key: 'avg_price', label: 'Ср. цена скупки', value: (r) => r.avg_price, hint: 'Средняя цена с учётом скупки нескольких лотов по возрастающей',
-      render: (r) => `<span class="num">${fmt(r.avg_price)}</span>` },
-    { key: 'bm_buy_now', label: 'Выкуп ЧР сейчас', value: (r) => r.bm_buy_now, hint: 'Текущая цена выкупа на Чёрном рынке',
-      render: (r) => `<span class="num" style="color:var(--gold)">${fmt(r.bm_buy_now)}</span>` },
-    { key: 'total_cost', label: 'Затраты', value: (r) => r.total_cost,
-      render: (r) => `<span class="num">${fmt(r.total_cost)}</span>` },
-    { key: 'total_profit', label: 'Прибыль', value: (r) => r.total_profit,
-      render: (r) => `<span class="num profit-pos">${signed(r.total_profit)}</span>` },
-    { key: 'profit_pct', label: 'Прибыль %', value: (r) => r.profit_pct,
-      render: (r) => `<span class="num ${profitCls(r.profit_pct)}">${r.profit_pct >= 0 ? '+' : ''}${r.profit_pct}%</span>` },
-    { key: 'bm_daily_volume', label: 'ЧР шт/день', value: (r) => r.bm_daily_volume,
-      render: (r) => `<span class="num cell-dim">${r.bm_daily_volume}</span>` },
-    { key: 'reliability', label: 'Надёжность', value: (r) => r.reliability, render: (r) => renderScoreCell(r.reliability) },
-  ];
-}
-
 function buildColumns() {
-  if (state.view === 'flips') return flipColumns();
-  if (state.view === 'cities') return cityColumns();
-  if (state.view === 'recommend') return recommendColumns();
-  return statsColumns();
+  if (state.view === 'flips') return colsFlips();
+  if (state.view === 'plan') return colsPlan();
+  if (state.view === 'cities') return colsCities();
+  return colsStats();
 }
 
-// ---- rendering ------------------------------------------------------------
+// ---------------------------------------------------------------- render
 
 function renderHead(cols) {
   const s = state.sort[state.view];
   $('#thead').innerHTML = '<tr>' + cols.map((c) => {
     const sorted = c.key === s.key;
-    const cls = [c.left ? 'left' : '', sorted ? 'sorted' : ''].join(' ').trim();
+    const cls = [c.left ? 'left' : '', c.stick ? 'stick' : '', sorted ? 'sorted' : ''].filter(Boolean).join(' ');
     const arrow = sorted
-      ? ` <span class="arrow">${s.dir === 'asc' ? '▲' : '▼'}</span>`
-      : ' <span class="arrow" style="opacity:.25">▽</span>';
-    const title = c.hint ? ` title="${c.hint}"` : '';
-    return `<th class="${cls}" data-sort="${c.key}"${title}>${c.label}${arrow}</th>`;
+      ? `<span class="arrow">${s.dir === 'asc' ? '▲' : '▼'}</span>`
+      : '<span class="arrow" style="opacity:.22">▽</span>';
+    const t = c.hint ? ` title="${esc(c.hint)}"` : '';
+    return `<th class="${cls}" data-sort="${esc(c.key)}"${t}>${esc(c.label)}${arrow}</th>`;
   }).join('') + '</tr>';
-
   $('#thead').querySelectorAll('th[data-sort]').forEach((th) => {
     th.addEventListener('click', () => onSort(th.dataset.sort));
   });
@@ -224,261 +331,357 @@ function renderHead(cols) {
 
 function onSort(key) {
   const s = state.sort[state.view];
-  if (s.key === key) {
-    s.dir = s.dir === 'asc' ? 'desc' : 'asc';
-  } else {
-    s.key = key;
-    s.dir = ASC_FIRST.has(key) ? 'asc' : 'desc';
-  }
-  if (state.view === 'cities') {
-    renderCurrent();          // client-side sort, no refetch
-  } else {
-    load();                   // server-side sort
-  }
+  if (s.key === key) s.dir = (s.dir === 'asc' ? 'desc' : 'asc');
+  else { s.key = key; s.dir = ASC_FIRST.has(key) ? 'asc' : 'desc'; }
+  // Client-sorted views re-render instantly; server-sorted views refetch.
+  if (CLIENT_SORTED.has(state.view)) render();
+  else load();
 }
 
 function sortedRows(cols) {
-  if (state.view !== 'cities' && state.view !== 'recommend') return state.rows;  // server-sorted
-  const s = state.sort.cities;
+  if (!CLIENT_SORTED.has(state.view)) return state.rows;
+  const s = state.sort[state.view];                 // <- per-view, not always `cities`
   const col = cols.find((c) => c.key === s.key);
+  if (!col || !col.value) return state.rows;
   const rows = state.rows.slice();
-  if (col && col.value) {
-    rows.sort((a, b) => {
-      const av = col.value(a), bv = col.value(b);
-      let r = typeof av === 'string' ? av.localeCompare(bv, 'ru') : (av - bv);
-      return s.dir === 'asc' ? r : -r;
-    });
-  }
+  rows.sort((a, b) => {
+    const av = col.value(a), bv = col.value(b);
+    const r = (typeof av === 'string' || typeof bv === 'string')
+      ? String(av).localeCompare(String(bv), 'ru')
+      : (av - bv);
+    return s.dir === 'asc' ? r : -r;
+  });
   return rows;
 }
 
+const EMPTY_MSG = {
+  flips: 'Под текущие фильтры выгодных флипов нет.<br>Снизь мин. прибыль, расширь период или сбрось фильтры.',
+  plan: 'На этот бюджет нечего купить.<br>Увеличь бюджет, снизь мин. прибыль или выбери другой город.',
+  cities: 'Нет данных по городам под эти фильтры.',
+  stats: 'Нет данных по этим фильтрам. Если сервер только запустился — подожди, пока догрузится история.',
+};
+
 function renderRows(cols, rows) {
+  const tb = $('#tbody');
   if (!rows.length) {
-    $('#tbody').innerHTML = '';
+    tb.innerHTML = '';
     const e = $('#emptyState');
     e.hidden = false;
-    e.textContent = state.view === 'flips'
-      ? 'Флипов по текущим фильтрам нет. Снизьте мин. прибыль или дождитесь обновления данных.'
-      : state.view === 'cities' ? 'Нет данных по городам под эти фильтры.'
-      : state.view === 'recommend' ? 'Под этот бюджет и фильтры нечего рекомендовать. Увеличьте бюджет.'
-      : 'Нет данных по этим фильтрам.';
+    e.innerHTML = EMPTY_MSG[state.view] || 'Нет данных.';
     return;
   }
   $('#emptyState').hidden = true;
-  $('#tbody').innerHTML = rows.map((r) =>
-    '<tr>' + cols.map((c) => `<td class="${c.left ? 'left' : ''}">${c.render(r)}</td>`).join('') + '</tr>'
-  ).join('');
+  tb.innerHTML = rows.map((r) => '<tr>' + cols.map((c) => {
+    const cls = [c.left ? 'left' : '', c.stick ? 'stick' : ''].filter(Boolean).join(' ');
+    let html;
+    try { html = c.render(r); } catch (err) { html = '<span class="dimc">—</span>'; }
+    return `<td class="${cls}">${html}</td>`;
+  }).join('') + '</tr>').join('');
 }
 
-function renderCurrent() {
+function render() {
   const cols = buildColumns();
   renderHead(cols);
   renderRows(cols, sortedRows(cols));
+  state.cols = cols;
 }
 
-// ---- data ----------------------------------------------------------------
+// ---------------------------------------------------------------- KPIs + note
 
-function currentFilters() {
+function kpi(label, val, sub, tone) {
+  return `<div class="kpi ${tone || ''}"><div class="kpi-label">${label}</div>`
+       + `<div class="kpi-val">${val}</div>${sub ? `<div class="kpi-sub">${sub}</div>` : ''}</div>`;
+}
+
+function renderKpis(d) {
+  const box = $('#kpis');
+  if (state.view === 'plan') {
+    const b = d.best;
+    if (!b || !b.items_count) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.innerHTML =
+      kpi('Город закупки', esc(cityRu(d.city)), `риск ${b.gank_rate}% · рейс ~${b.trip_hours} ч`, 'gold') +
+      kpi('Вложить', compact(b.spent), `остаток ${compact(b.leftover)} · позиций ${b.items_count}`) +
+      kpi('Прибыль (без потерь)', signed(b.profit), `ROI ${b.roi_pct}%`, 'good') +
+      kpi('С учётом риска ганка', signed(b.ev_profit), `ROI ${b.ev_roi_pct}% · цена риска ${compact(b.risk_cost)}`, b.ev_profit > 0 ? 'good' : 'bad') +
+      kpi('Прибыль в час', signed(b.profit_per_hour), 'закупка + дорога') +
+      kpi('Данные', b.live_share_pct + '% live', `стакан ${fmt(d.orderbook.orders)} ордеров`, b.live_share_pct >= 50 ? 'good' : '');
+    return;
+  }
+  if (state.view === 'flips') {
+    const rows = state.rows;
+    if (!rows.length) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    const med = (arr) => { const a = arr.slice().sort((x, y) => x - y); return a[Math.floor(a.length / 2)]; };
+    const good = rows.filter((r) => r.reliability >= 60).length;
+    const upsell = rows.filter((r) => r.quality_upsell).length;
+    box.innerHTML =
+      kpi('Флипов найдено', fmt(d.total), `показано ${rows.length}`, 'gold') +
+      kpi('Медианная прибыль', signed(med(rows.map((r) => r.profit))), 'на 1 шт, после налога') +
+      kpi('Медианный %', med(rows.map((r) => r.profit_pct)) + '%', 'к затратам') +
+      kpi('Надёжных (≥60)', fmt(good), `из ${rows.length}`, good ? 'good' : '') +
+      kpi('Через низкое кач-во', fmt(upsell), 'ордер qN принимает q≥N', upsell ? 'good' : '') +
+      kpi('Модель', `×${d.net}`, `налог ${(d.sales_tax * 100).toFixed(0)}%${d.sell_mode === 'order' ? ' + сбор 2.5%' : ''} · ганк ${(d.gank_rate * 100).toFixed(0)}%`);
+    return;
+  }
+  box.hidden = true;
+  box.innerHTML = '';
+}
+
+function renderNote(d) {
+  const w = WIN_RU[state.window];
+  const n = $('#note');
+  if (state.view === 'flips') {
+    const where = d.buy_city
+      ? `закупка только в <b>${esc(cityRu(d.buy_city))}</b>`
+      : 'по каждому предмету показан лучший город';
+    n.innerHTML = `${where} · прибыль = <code>ставка ЧР × ${d.net} − цена закупки${d.cost_mult !== 1 ? ' × ' + d.cost_mult : ''}</code>`
+      + ` · «По средней ЧР» — та же сделка по средней цене ЧР за ${w} (защита от разового скачка)`
+      + ` · сортировка по столбцу — клик по заголовку, наведи на заголовок чтобы увидеть формулу.`;
+  } else if (state.view === 'plan') {
+    const b = d.best;
+    if (!b || !b.items_count) {
+      n.innerHTML = `На бюджет <b>${fmt(d.budget)}</b> подходящих закупок нет. Увеличь бюджет или снизь мин. прибыль в «⚙ Модель».`;
+      return;
+    }
+    const cmp = (d.cities || []).slice(0, 6)
+      .map((c) => `${esc(cityRu(c.city))} <b>${signed(c.ev_profit)}</b>`).join(' · ');
+    const mode = d.has_depth
+      ? `количества ограничены <b>реальным живым стаканом</b>`
+      : `живого стакана пока нет — количества ограничены сверху (<b>оценка</b>)`;
+    n.innerHTML = `${mode}. Сравнение городов по прибыли с учётом риска: ${cmp}.`
+      + `<br>Не влез в бюджет — впиши остаток и обнови, пересчитаю по актуальным ордерам. Один предмет не получает больше 30% бюджета.`;
+  } else if (state.view === 'cities') {
+    n.innerHTML = `Города отсортированы по сумме оценок лучших ${d.top_n} флипов за ${w}.`
+      + ` Начинай с верхнего. <b>Карлеон</b> стоит особняком: цены там выше, зато риск потерять груз нулевой — до ЧР пара шагов.`;
+  } else {
+    n.innerHTML = `Показано <b>${fmt(d.rows.length)}</b> из <b>${fmt(d.total)}</b> · цены средневзвешенные по объёму сделок за ${w}`
+      + ` (последние ${d.window_days} полных суток UTC) · клик по названию города — сортировка по его цене · зелёным отмечен самый дешёвый город.`;
+  }
+}
+
+// ---------------------------------------------------------------- data
+
+function filters() {
   const p = new URLSearchParams();
   p.set('window', state.window);
-  const search = $('#search').value.trim();
-  const category = $('#category').value;
-  const tier = $('#tier').value;
-  const quality = $('#quality').value;
-  if (search) p.set('search', search);
-  if (category) p.set('category', category);
-  if (tier) p.set('tier', tier);
-  if (quality) p.set('quality', quality);
+  const add = (id, name) => { const v = $(id).value.trim(); if (v !== '') p.set(name, v); };
+  add('#search', 'search');
+  add('#category', 'category');
+  add('#tier', 'tier');
+  add('#enchant', 'enchant');
+  add('#quality', 'quality');
 
-  if (state.view === 'cities') {
-    p.set('top_n', '100');
-    const mp = $('#minProfit').value;
-    if (mp !== '') p.set('min_profit', mp);
-    return p;
+  if (state.view !== 'stats') {
+    add('#minProfit', 'min_profit');
+    add('#minProfitPct', 'min_profit_pct');
+    add('#minVolume', 'min_bm_volume');
+    p.set('gank_rate', (Number($('#gank').value) / 100).toFixed(2));
+    p.set('sell_mode', $('#sellMode').value);
+    p.set('buy_mode', $('#buyMode').value);
   }
 
-  if (state.view === 'recommend') {
+  if (state.view === 'plan') {
     p.set('budget', $('#budget').value || '0');
-    const bc = $('#buyCity').value;
-    if (bc) p.set('city', bc);
-    const mp = $('#minProfit').value;
-    if (mp !== '') p.set('min_profit', mp);
+    const c = $('#buyCity').value; if (c) p.set('city', c);
     return p;
   }
+  if (state.view === 'cities') { p.set('top_n', '100'); return p; }
 
-  p.set('limit', '300');
+  p.set('limit', '400');
   const s = state.sort[state.view];
   p.set('sort', s.key);
   p.set('direction', s.dir);
-  if (state.view === 'flips') {
-    const mp = $('#minProfit').value;
-    if (mp !== '') p.set('min_profit', mp);
-    const bc = $('#buyCity').value;
-    if (bc) p.set('buy_city', bc);
-  }
+  if (state.view === 'flips') { const c = $('#buyCity').value; if (c) p.set('buy_city', c); }
   return p;
 }
 
-const ENDPOINT = { flips: '/api/flips', cities: '/api/cities', stats: '/api/stats', recommend: '/api/recommend' };
+const ENDPOINT = { flips: '/api/flips', plan: '/api/plan', cities: '/api/cities', stats: '/api/stats' };
 
 async function load() {
   if (state.loading) return;
   state.loading = true;
-  const showOverlay = !$('#tbody').children.length;
-  if (showOverlay) $('#loader').hidden = false;
+  $('#loader').hidden = false;
   try {
-    const data = await fetchJSON(`${ENDPOINT[state.view]}?${currentFilters().toString()}`);
-    state.rows = state.view === 'recommend' ? ((data.best && data.best.items) || []) : (data.rows || []);
-    renderCurrent();
-    updateMetaLine(data);
+    const d = await fetchJSON(`${ENDPOINT[state.view]}?${filters()}`);
+    state.payload = d;
+    state.rows = state.view === 'plan' ? ((d.best && d.best.items) || []) : (d.rows || []);
+    render();
+    renderKpis(d);
+    renderNote(d);
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'сервер не ответил вовремя' : err.message;
     toast('Ошибка загрузки: ' + msg, 'err');
-    if (!$('#tbody').children.length) {
+    if (!state.rows.length) {
+      $('#tbody').innerHTML = '';
       $('#emptyState').hidden = false;
-      $('#emptyState').textContent = 'Не удалось загрузить данные.';
+      $('#emptyState').innerHTML = `Не удалось загрузить данные: ${esc(msg)}.<br>Проверь логи: <code>/root/logs/shopalbi.log</code>`;
     }
   } finally {
     state.loading = false;
-    $('#loader').hidden = true;
+    $('#loader').hidden = true;     // always cleared, even on a thrown render
   }
 }
 
-function updateMetaLine(data) {
-  const wl = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц' }[state.window];
-  if (state.view === 'flips') {
-    const where = data.buy_city ? ` · закупка в <b>${cityName(data.buy_city)}</b>` : ' · лучший город по каждому предмету';
-    $('#metaLine').innerHTML =
-      `Найдено флипов: <b>${data.total}</b>${where} · выручка после налога <b>${((1 - data.sales_tax) * 100).toFixed(0)}%</b>` +
-      ` · «Выгодность» = прибыль × надёжность, «Прибыль (за период)» — по средней цене ЧР за ${wl}.`;
-  } else if (state.view === 'cities') {
-    $('#metaLine').innerHTML =
-      `Города отсортированы по совокупной выгодности (сумма по лучшим 100 флипам города) за ${wl}. ` +
-      `Начинай с верхнего — там больше всего выгодных вещей.`;
-  } else if (state.view === 'recommend') {
-    const b = data.best;
-    if (!b || !b.items_count) {
-      $('#metaLine').innerHTML =
-        `Под бюджет <b>${fmt(data.budget)}</b> выгодных закупок не найдено. Увеличь бюджет, снизь мин. прибыль или выбери другой город.`;
-    } else {
-      const cmp = data.cities.slice(0, 6)
-        .map((c) => `${cityName(c.city)}: <b>+${fmt(c.expected_profit)}</b>`).join(' · ');
-      const taxPct = ((data.sales_tax + data.setup_fee) * 100).toFixed(1);
-      const mode = b.source === 'live'
-        ? `по <b>реальной глубине стакана</b> (в стакане ${fmt(data.orderbook_orders)} живых ордеров)`
-        : `<b>оценка</b> — живой стакан ещё набирается (${fmt(data.orderbook_orders)} ордеров), количества ограничены сверху`;
-      $('#metaLine').innerHTML =
-        `Лучший город: <b>${cityName(data.city)}</b> · закупка на <b>${fmt(b.spent)}</b> → ожидаемая прибыль ` +
-        `<b class="profit-pos">+${fmt(b.expected_profit)}</b> (ROI ${b.roi_pct}%) · остаток <b>${fmt(b.leftover)}</b> · позиций ${b.items_count}.` +
-        `<br><span class="cell-dim">Расчёт ${mode}. Сравнение городов: ${cmp}. Налог+сбор ${taxPct}%. ` +
-        `Остался бюджет — впиши остаток и обнови, пересчитаю по актуальным ордерам.</span>`;
-    }
-  } else {
-    $('#metaLine').innerHTML =
-      `Показано предметов: <b>${data.rows.length}</b> из <b>${data.total}</b> · ` +
-      `цены — средневзвешенные по объёму за ${wl}. Клик по городу — сортировка по его цене.`;
+// ---------------------------------------------------------------- CSV
+
+function exportCsv() {
+  const cols = state.cols || buildColumns();
+  const rows = sortedRows(cols);
+  if (!rows.length) { toast('Нечего экспортировать', 'err'); return; }
+  const cell = (v) => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [cols.map((c) => cell(c.label)).join(';')];
+  for (const r of rows) {
+    lines.push(cols.map((c) => cell(c.csv ? c.csv(r) : '')).join(';'));
   }
+  // BOM so Excel opens Cyrillic correctly; ';' because ru locale Excel expects it.
+  const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `shopalbi-${state.view}-${state.window}-${new Date().toISOString().slice(0, 16).replace(':', '')}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  toast(`Выгружено строк: ${rows.length}`, 'ok');
 }
 
-// ---- status --------------------------------------------------------------
+// ---------------------------------------------------------------- status
 
 async function pollStatus() {
   try {
-    const s = await fetchJSON('/api/status', 8000);
+    const s = await fetchJSON('/api/status', 10000);
     const dot = $('#statusDot');
-    if (!s.current_refreshed_at || s.current_rows === 0) {
+    const ob = s.orderbook || {};
+    if (!s.current_refreshed_at || !s.current_rows) {
       dot.className = 'dot warn';
-      $('#statusText').textContent = `Каталог: ${fmt(s.items)} предметов · сбор данных…`;
+      $('#statusMain').textContent = `Каталог ${fmt(s.items)} предметов · идёт первичный сбор данных…`;
+      $('#statusSub').textContent = 'обычно 1–2 минуты';
     } else {
-      dot.className = 'dot ok';
-      const book = s.orderbook_orders ? ` · стакан ${fmt(s.orderbook_orders)} ордеров` : '';
-      $('#statusText').textContent =
-        `Цены: ${timeAgo(s.current_refreshed_at)} · история: ${timeAgo(s.history_refreshed_at)} · ${fmt(s.items)} предметов${book}`;
+      dot.className = s.refresh_running ? 'dot warn' : 'dot ok';
+      $('#statusMain').textContent =
+        `Цены ${timeAgo(s.current_refreshed_at)} · история ${timeAgo(s.history_refreshed_at)}`;
+      $('#statusSub').textContent =
+        `${fmt(s.items)} предметов · живой стакан ${fmt(ob.orders)} ордеров`
+        + (ob.npc_orders ? ` (${fmt(ob.npc_orders)} ЧР)` : '')
+        + (s.refresh_running ? ' · обновляется…' : '');
     }
-    $('#taxNote').textContent = `Налог продажи ЧР (премиум): ${(s.sales_tax * 100).toFixed(0)}%`;
-  } catch {
+    $('#taxNote').textContent =
+      `Налог ЧР ${(s.sales_tax * 100).toFixed(0)}% (Premium) · сбор за ордер ${(s.setup_fee * 100).toFixed(1)}% · v${s.version}`;
+  } catch (e) {
     $('#statusDot').className = 'dot err';
-    $('#statusText').textContent = 'Сервер недоступен';
+    $('#statusMain').textContent = 'Сервер недоступен';
+    $('#statusSub').textContent = '';
   }
 }
 
-// ---- init -----------------------------------------------------------------
+// ---------------------------------------------------------------- init
 
 async function initMeta() {
-  try {
-    const m = await fetchJSON('/api/meta');
-    state.meta = m;
-    state.cities = m.cities;
-    const buyCity = $('#buyCity');
-    for (const c of (m.buy_cities || m.cities)) buyCity.insertAdjacentHTML('beforeend', `<option value="${c}">${cityName(c)}</option>`);
-    const cat = $('#category');
-    for (const c of m.categories) cat.insertAdjacentHTML('beforeend', `<option value="${c.id}">${c.label}</option>`);
-    const tier = $('#tier');
-    for (const t of m.tiers) tier.insertAdjacentHTML('beforeend', `<option value="${t}">T${t}</option>`);
-    const q = $('#quality');
-    for (const qq of m.qualities) q.insertAdjacentHTML('beforeend', `<option value="${qq.id}">${qq.label}</option>`);
-  } catch {
-    toast('Не удалось загрузить справочники', 'err');
+  const m = await fetchJSON('/api/meta');
+  state.meta = m;
+  state.cities = m.cities;
+  const opt = (el, v, label) => el.insertAdjacentHTML('beforeend', `<option value="${esc(v)}">${esc(label)}</option>`);
+  for (const c of m.buy_cities) opt($('#buyCity'), c, cityRu(c));
+  for (const c of m.categories) opt($('#category'), c.id, c.label);
+  for (const t of m.tiers) opt($('#tier'), t, 'T' + t);
+  for (const e of m.enchants) opt($('#enchant'), e, e === 0 ? 'Без зач. (.0)' : '.' + e);
+  for (const q of m.qualities) opt($('#quality'), q.id, q.label);
+  $('#gank').value = Math.round((m.gank_rate || 0.08) * 100);
+  $('#gankVal').textContent = $('#gank').value + '%';
+}
+
+function syncControls() {
+  const v = state.view;
+  $('#budgetWrap').hidden = v !== 'plan';
+  $('#buyCity').hidden = !(v === 'flips' || v === 'plan');
+  const modelUsed = v !== 'stats';
+  $('#advBtn').hidden = !modelUsed;
+  if (!modelUsed) {
+    $('#advRow').hidden = true;
+    $('#advBtn').classList.remove('on');
   }
 }
 
-function updateControlsVisibility() {
-  const v = state.view;
-  // buy-city applies to flips and the recommender (there it picks / fixes the city)
-  $('#buyCity').style.display = (v === 'flips' || v === 'recommend') ? '' : 'none';
-  $('#minProfitWrap').style.display = v === 'stats' ? 'none' : '';
-  $('#budgetWrap').style.display = v === 'recommend' ? '' : 'none';
-}
-
-function wireEvents() {
+function wire() {
   $('#mainTabs').addEventListener('click', (e) => {
-    const btn = e.target.closest('.tab');
-    if (!btn) return;
+    const b = e.target.closest('.tab');
+    if (!b || b.classList.contains('active')) return;
     document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
-    btn.classList.add('active');
-    state.view = btn.dataset.view;
+    b.classList.add('active');
+    state.view = b.dataset.view;
     state.rows = [];
     $('#tbody').innerHTML = '';
-    updateControlsVisibility();
+    $('#kpis').hidden = true;
+    syncControls();
     load();
   });
 
   $('#windowSwitch').addEventListener('click', (e) => {
-    const btn = e.target.closest('.win');
-    if (!btn) return;
-    document.querySelectorAll('.win').forEach((w) => w.classList.remove('active'));
-    btn.classList.add('active');
-    state.window = btn.dataset.window;
+    const b = e.target.closest('.seg-btn');
+    if (!b || b.classList.contains('active')) return;
+    document.querySelectorAll('.seg-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    state.window = b.dataset.window;
     load();
   });
 
   const deb = debounce(load, 350);
   $('#search').addEventListener('input', deb);
-  $('#buyCity').addEventListener('change', load);
-  $('#category').addEventListener('change', load);
-  $('#tier').addEventListener('change', load);
-  $('#quality').addEventListener('change', load);
-  $('#minProfit').addEventListener('input', debounce(load, 500));
-  $('#budget').addEventListener('input', debounce(load, 500));
+  ['#category', '#tier', '#enchant', '#quality', '#buyCity', '#sellMode', '#buyMode']
+    .forEach((id) => $(id).addEventListener('change', load));
+  ['#minProfit', '#minProfitPct', '#minVolume', '#budget']
+    .forEach((id) => $(id).addEventListener('input', debounce(load, 450)));
+  $('#gank').addEventListener('input', () => { $('#gankVal').textContent = $('#gank').value + '%'; });
+  $('#gank').addEventListener('change', load);
+
+  $('#advBtn').addEventListener('click', () => {
+    const r = $('#advRow');
+    r.hidden = !r.hidden;
+    $('#advBtn').classList.toggle('on', !r.hidden);
+  });
+  $('#csvBtn').addEventListener('click', exportCsv);
+
+  $('#resetBtn').addEventListener('click', () => {
+    $('#search').value = '';
+    ['#category', '#tier', '#enchant', '#quality', '#buyCity'].forEach((id) => { $(id).value = ''; });
+    $('#minProfit').value = 1000;
+    $('#minProfitPct').value = 0;
+    $('#minVolume').value = 1;
+    $('#sellMode').value = 'instant';
+    $('#buyMode').value = 'instant';
+    $('#gank').value = Math.round(((state.meta && state.meta.gank_rate) || 0.08) * 100);
+    $('#gankVal').textContent = $('#gank').value + '%';
+    load();
+  });
 
   $('#refreshBtn').addEventListener('click', async () => {
-    const btn = $('#refreshBtn');
-    btn.classList.add('spinning');
+    const b = $('#refreshBtn');
+    b.classList.add('busy');
     try {
       await fetch('/api/refresh', { method: 'POST' });
-      toast('Обновление данных запущено. Это займёт 1–2 минуты.', 'ok');
-    } catch {
+      toast('Обновление запущено — цены через ~20 сек, история через ~1 мин.', 'ok');
+      setTimeout(pollStatus, 3000);
+      setTimeout(load, 30000);
+    } catch (e) {
       toast('Не удалось запустить обновление', 'err');
     }
-    setTimeout(() => btn.classList.remove('spinning'), 2000);
+    setTimeout(() => b.classList.remove('busy'), 2500);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === '/' && document.activeElement !== $('#search')) {
+      e.preventDefault(); $('#search').focus();
+    }
   });
 }
 
 (async function main() {
-  wireEvents();
-  updateControlsVisibility();
-  await initMeta();
-  await pollStatus();
+  wire();
+  syncControls();
+  try { await initMeta(); } catch (e) { toast('Не удалось загрузить справочники: ' + e.message, 'err'); }
+  pollStatus();
   await load();
   setInterval(pollStatus, 20000);
 })();

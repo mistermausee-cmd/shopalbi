@@ -10,11 +10,12 @@ services:
       # host:container — log files land in /root/logs on the VPS
       - /root/logs:/logs
     environment:
-      # EU server + Premium tax (4%). Override any of these as needed.
+      # EU server + Premium. Full list of knobs: see .env.example
       - SHOPALBI_API_HOST=https://europe.albion-online-data.com
       - SHOPALBI_SALES_TAX=0.04
+      - SHOPALBI_GANK_RATE=0.08
       - SHOPALBI_CURRENT_REFRESH_MINUTES=10
-      - SHOPALBI_HISTORY_REFRESH_HOURS=12
+      - SHOPALBI_HISTORY_REFRESH_HOURS=6
       - SHOPALBI_LOG_DIR=/logs
       # Optional password protection (leave empty to keep the site open):
       # - SHOPALBI_AUTH_USER=admin
@@ -22,10 +23,16 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://127.0.0.1:8000/api/health').status==200 else sys.exit(1)"]
-      interval: 30s
+      interval: 60s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
+    logging:
+      # Keep container logs from filling the disk on a small VPS.
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   shopalbi-data:

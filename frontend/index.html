@@ -3,78 +3,131 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>shopalbi — сканер рынка Albion Online</title>
+  <meta name="color-scheme" content="dark" />
+  <title>shopalbi — анализатор Чёрного рынка Albion Online</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/styles.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css?v=__VERSION__" />
 </head>
 <body>
-  <div class="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="logo">◈</div>
-        <div>
-          <h1>shopalbi</h1>
-          <p class="sub">Сканер рынка Albion Online · сервер Europe · Чёрный рынок Карлеона</p>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">◈</div>
+      <div class="brand-txt">
+        <h1>shopalbi <span class="ver">v__VERSION__</span></h1>
+        <p class="sub">Чёрный рынок Карлеона · сервер Europe · Premium</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="statusbox" id="statusBox">
+        <span class="dot" id="statusDot"></span>
+        <div class="status-lines">
+          <span id="statusMain">Подключение…</span>
+          <span class="status-sub" id="statusSub"></span>
         </div>
       </div>
-      <div class="status" id="status">
-        <div class="status-row"><span class="dot" id="statusDot"></span><span id="statusText">Подключение…</span></div>
-        <button class="btn-refresh" id="refreshBtn" title="Обновить данные с сервера">⟳ Обновить</button>
+      <button class="btn" id="refreshBtn" title="Запросить свежие цены с AODP (1–2 минуты)">⟳ Обновить</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="mainTabs" role="tablist">
+    <button class="tab active" data-view="flips"  role="tab">🔥 Выгодные флипы</button>
+    <button class="tab" data-view="plan"   role="tab">🧮 План закупки</button>
+    <button class="tab" data-view="cities" role="tab">🏙 Города закупки</button>
+    <button class="tab" data-view="stats"  role="tab">📊 Средние цены</button>
+  </nav>
+
+  <section class="controls">
+    <div class="ctl-row">
+      <div class="seg" id="windowSwitch" title="Период, за который считается средняя цена и оборот ЧР">
+        <button class="seg-btn active" data-window="day">День</button>
+        <button class="seg-btn" data-window="3d">3 дня</button>
+        <button class="seg-btn" data-window="week">Неделя</button>
+        <button class="seg-btn" data-window="month">Месяц</button>
       </div>
-    </header>
 
-    <nav class="tabs" id="mainTabs">
-      <button class="tab active" data-view="flips">🔥 Выгодные флипы</button>
-      <button class="tab" data-view="recommend">💡 Рекомендации к покупке</button>
-      <button class="tab" data-view="cities">🏙 Топ городов</button>
-      <button class="tab" data-view="stats">📊 Средние цены</button>
-    </nav>
+      <input type="search" id="search" class="input grow" placeholder="🔍 Поиск предмета или ID (T6_2H_AXE)…" />
 
-    <section class="controls" id="controls">
-      <div class="window-switch" id="windowSwitch">
-        <button class="win active" data-window="day">День</button>
-        <button class="win" data-window="3d">3 дня</button>
-        <button class="win" data-window="week">Неделя</button>
-        <button class="win" data-window="month">Месяц</button>
-      </div>
+      <label class="fld" id="budgetWrap" hidden>
+        <span>💰 Бюджет</span>
+        <input type="number" id="budget" class="input mono" style="width:130px" value="3000000" step="250000" min="0" />
+      </label>
 
-      <div class="filters">
-        <input type="search" id="search" class="input" placeholder="Поиск предмета…" />
-        <select id="buyCity" class="input" title="Город, в котором закупаешься"><option value="">🏙 Любой город</option></select>
-        <select id="category" class="input"><option value="">Все типы</option></select>
-        <select id="tier" class="input"><option value="">Все тиры</option></select>
-        <select id="quality" class="input"><option value="">Любое качество</option></select>
-        <label class="minprofit" id="minProfitWrap">
-          <span>Мин. прибыль</span>
-          <input type="number" id="minProfit" class="input small" value="1000" step="1000" min="0" />
-        </label>
-        <label class="minprofit" id="budgetWrap" style="display:none">
-          <span>💰 Бюджет (серебро)</span>
-          <input type="number" id="budget" class="input" style="width:150px" value="1000000" step="100000" min="0" />
-        </label>
-      </div>
-    </section>
+      <select id="buyCity" class="input" title="Город закупки"><option value="">🏙 Все города</option></select>
+      <select id="category" class="input"><option value="">Все типы</option></select>
+      <select id="tier" class="input"><option value="">Все тиры</option></select>
+      <select id="enchant" class="input"><option value="">Любое зач.</option></select>
+      <select id="quality" class="input"><option value="">Любое кач-во</option></select>
 
-    <section class="meta-line" id="metaLine"></section>
+      <button class="btn ghost" id="advBtn" title="Тонкая настройка модели">⚙ Модель</button>
+      <button class="btn ghost" id="csvBtn" title="Скачать текущую таблицу в CSV">⤓ CSV</button>
+    </div>
 
-    <main class="table-wrap">
-      <table id="dataTable">
-        <thead id="thead"></thead>
-        <tbody id="tbody"></tbody>
-      </table>
-      <div class="empty" id="emptyState" hidden></div>
-      <div class="loader" id="loader" hidden><div class="spinner"></div><span>Загрузка…</span></div>
-    </main>
+    <div class="ctl-row adv" id="advRow" hidden>
+      <label class="fld">
+        <span>Мин. прибыль, серебро</span>
+        <input type="number" id="minProfit" class="input mono small" value="1000" step="1000" min="0" />
+      </label>
+      <label class="fld">
+        <span>Мин. прибыль, %</span>
+        <input type="number" id="minProfitPct" class="input mono small" value="0" step="5" min="0" />
+      </label>
+      <label class="fld">
+        <span>Мин. оборот ЧР, шт/день</span>
+        <input type="number" id="minVolume" class="input mono small" value="1" step="1" min="0" />
+      </label>
+      <label class="fld grow">
+        <span>Риск ганка на рейс: <b id="gankVal">8%</b>
+          <i class="hint" title="Шанс потерять весь груз по дороге в Карлеон. Сообщества сходятся на 5–15% в прайм-тайм. Ожидаемая ценность рейса = (1−p)×выручка − затраты. Для закупки в самом Карлеоне риск = 0.">?</i>
+        </span>
+        <input type="range" id="gank" min="0" max="40" step="1" value="8" />
+      </label>
+      <label class="fld">
+        <span>Как продаёшь на ЧР
+          <i class="hint" title="«Мгновенно» — жмёшь Sell в существующий ордер выкупа: только налог 4%, сбора за размещение нет. «Своим ордером» — ставишь свой sell order на ЧР: налог 4% + сбор 2.5%, и ждёшь, пока цена ЧР дорастёт.">?</i>
+        </span>
+        <select id="sellMode" class="input">
+          <option value="instant">Мгновенно в ордер (−4%)</option>
+          <option value="order">Своим ордером (−6.5%)</option>
+        </select>
+      </label>
+      <label class="fld">
+        <span>Как покупаешь в городе
+          <i class="hint" title="«Мгновенно» — выкупаешь существующий ордер продажи, сбора нет. «Своим ордером» — ставишь buy order дешевле и ждёшь: +2.5% сбор, зато цена ниже.">?</i>
+        </span>
+        <select id="buyMode" class="input">
+          <option value="instant">Мгновенно из ордера</option>
+          <option value="order">Своим buy-ордером (+2.5%)</option>
+        </select>
+      </label>
+      <button class="btn ghost" id="resetBtn">Сбросить</button>
+    </div>
+  </section>
 
-    <footer class="footer">
-      <span>Данные: <a href="https://www.albion-online-data.com" target="_blank" rel="noopener">Albion Online Data Project</a> · названия: ao-bin-dumps</span>
-      <span id="taxNote"></span>
-    </footer>
-  </div>
+  <section class="kpis" id="kpis" hidden></section>
+  <section class="note" id="note"></section>
 
-  <div class="toast" id="toast" hidden></div>
-  <script src="/app.js"></script>
+  <main class="table-wrap" id="tableWrap">
+    <table id="dataTable">
+      <thead id="thead"></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="state" id="emptyState" hidden></div>
+    <div class="bar-loader" id="loader" hidden><span></span></div>
+  </main>
+
+  <footer class="footer">
+    <span>Данные: <a href="https://www.albion-online-data.com" target="_blank" rel="noopener">Albion Online Data Project</a>
+      (REST + живой NATS-стакан) · названия: <a href="https://github.com/ao-data/ao-bin-dumps" target="_blank" rel="noopener">ao-bin-dumps</a></span>
+    <span id="taxNote"></span>
+  </footer>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="/app.js?v=__VERSION__"></script>
 </body>
 </html>

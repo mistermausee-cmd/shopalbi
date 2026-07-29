@@ -4,14 +4,15 @@ with localized (RU) display names.
 
 The source file is a JSON array of ~12k entries, each shaped like:
     {"UniqueName": "T4_BAG@2", "LocalizedNames": {"EN-US": "...", "RU-RU": "..."}}
-Enchantment variants (@1..@4) are listed as their own entries, so we simply
-filter them in rather than synthesising them.
+Enchantment variants (@1..@4) are listed as their own entries, so we filter them
+in rather than synthesising them.
 """
 
 from __future__ import annotations
 
 import gzip
 import json
+import logging
 import re
 import time
 import urllib.request
@@ -20,11 +21,27 @@ from pathlib import Path
 
 from . import config
 
+log = logging.getLogger("shopalbi.catalog")
+
 # Item ids look like: T4_BAG, T4_BAG@2, T6_2H_AXE, T5_HEAD_PLATE_SET1@3,
 # T8_OFF_SHIELD_HELL. Tier is the leading digit; enchant is the @N suffix;
 # the slot token is the second underscore-separated segment.
 _TIER_RE = re.compile(r"^T(\d)_")
 _ENCHANT_RE = re.compile(r"@(\d)$")
+
+# Localized names carry the tier word in parentheses, e.g.
+# "Куртка убийцы (магистр)" / "Assassin Jacket (Master's)". That duplicates the
+# tier badge, so it is stripped and replaced by a clean "Т7.3" label.
+_PAREN_TAIL_RE = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def clean_name(name: str) -> str:
+    return _PAREN_TAIL_RE.sub("", name or "").strip()
+
+
+def tier_label(tier: int, enchant: int) -> str:
+    """Compact tier.enchant badge, e.g. Т7.3 (Cyrillic Т, matching the RU UI)."""
+    return f"Т{tier}.{enchant}"
 
 
 @dataclass(frozen=True)
@@ -39,13 +56,12 @@ class Item:
     name_en: str
 
     def display_name(self) -> str:
-        base = self.name_ru or self.name_en or self.item_id
-        return f"{base} .{self.enchant}" if self.enchant else base
+        return clean_name(self.name_ru) or clean_name(self.name_en) or self.item_id
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["display_name"] = self.display_name()
-        d["tier_label"] = f"T{self.tier}"
+        d["tier_ench"] = tier_label(self.tier, self.enchant)
         d["category_label"] = config.CATEGORY_NAMES.get(self.category, self.category)
         return d
 
@@ -56,21 +72,17 @@ def _slot_token(unique_name: str) -> str | None:
     if len(parts) < 2:
         return None
     token = parts[1]
-    if token in config.EQUIP_SLOT_TOKENS:
-        return token
-    return None
+    return token if token in config.EQUIP_SLOT_TOKENS else None
 
 
 def _is_black_market_equipment(unique_name: str) -> bool:
     m = _TIER_RE.match(unique_name)
     if not m:
         return False
-    tier = int(m.group(1))
-    if tier not in config.TIERS:
+    if int(m.group(1)) not in config.TIERS:
         return False
-    if "_TOOL" in unique_name:            # gathering tools — BM does not buy these
-        return False
-    if "NONTRADABLE" in unique_name:
+    upper = unique_name.upper()
+    if any(tok in upper for tok in config.EXCLUDE_ID_TOKENS):
         return False
     return _slot_token(unique_name) is not None
 
@@ -78,7 +90,7 @@ def _is_black_market_equipment(unique_name: str) -> bool:
 def _download_catalog() -> bytes:
     req = urllib.request.Request(
         config.CATALOG_URL,
-        headers={"User-Agent": "shopalbi/1.0", "Accept-Encoding": "gzip"},
+        headers={"User-Agent": f"shopalbi/{config.VERSION}", "Accept-Encoding": "gzip"},
     )
     with urllib.request.urlopen(req, timeout=config.HTTP_TIMEOUT * 3) as r:
         raw = r.read()
@@ -101,11 +113,14 @@ def load_raw_catalog(force: bool = False) -> list[dict]:
         try:
             return json.loads(cache.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            pass  # fall through and re-download
+            log.warning("catalog cache unreadable, re-downloading")
     raw = _download_catalog()
     data = json.loads(raw)
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(raw)
+    try:
+        cache.write_bytes(raw)
+    except OSError:
+        log.warning("could not write catalog cache to %s", cache)
     return data
 
 
@@ -116,30 +131,24 @@ def build_items(force: bool = False) -> list[Item]:
     seen: set[str] = set()
     for entry in raw:
         uid = entry.get("UniqueName") or ""
-        if not uid or uid in seen:
-            continue
-        if not _is_black_market_equipment(uid):
+        if not uid or uid in seen or not _is_black_market_equipment(uid):
             continue
         slot = _slot_token(uid)
         if slot is None:
             continue
-        seen.add(uid)
-        base_id = uid.split("@", 1)[0]
-        tier = int(_TIER_RE.match(uid).group(1))
-        m_ench = _ENCHANT_RE.search(uid)
-        enchant = int(m_ench.group(1)) if m_ench else 0
         names = entry.get("LocalizedNames") or {}
-        name_ru = (names or {}).get(config.PRIMARY_LANG) or ""
-        name_en = (names or {}).get(config.FALLBACK_LANG) or ""
-        # Skip placeholder / unnamed entries (test items etc.)
+        name_ru = names.get(config.PRIMARY_LANG) or ""
+        name_en = names.get(config.FALLBACK_LANG) or ""
         if not name_ru and not name_en:
-            continue
+            continue  # placeholder / unnamed test entries
+        seen.add(uid)
+        m_ench = _ENCHANT_RE.search(uid)
         items.append(
             Item(
                 item_id=uid,
-                base_id=base_id,
-                tier=tier,
-                enchant=enchant,
+                base_id=uid.split("@", 1)[0],
+                tier=int(_TIER_RE.match(uid).group(1)),
+                enchant=int(m_ench.group(1)) if m_ench else 0,
                 slot=slot,
                 category=config.EQUIP_SLOT_TOKENS[slot],
                 name_ru=name_ru,
@@ -158,4 +167,4 @@ if __name__ == "__main__":
     for cat, n in sorted(by_cat.items()):
         print(f"  {cat:8s}: {n}")
     for it in its[:5]:
-        print("  sample:", it.item_id, "->", it.display_name())
+        print("  sample:", it.item_id, "->", it.display_name(), it.to_dict()["tier_ench"])
