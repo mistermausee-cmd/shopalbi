@@ -139,6 +139,7 @@ def api_stats(
     quality: int | None = None,
     search: str | None = None,
     sort: str = Query("bm_volume"),
+    direction: str = Query("desc"),
     limit: int = Query(200, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     _=Depends(require_auth),
@@ -147,7 +148,7 @@ def api_stats(
         raise HTTPException(status_code=400, detail=f"unknown window '{window}'")
     return _analytics_or_503().stats_table(
         window=window, category=category, tier=tier, quality=quality,
-        search=search, sort=sort, limit=limit, offset=offset,
+        search=search, sort=sort, direction=direction, limit=limit, offset=offset,
     )
 
 
@@ -160,7 +161,9 @@ def api_flips(
     tier: int | None = None,
     quality: int | None = None,
     search: str | None = None,
-    sort: str = Query("profit_pct"),
+    buy_city: str | None = None,
+    sort: str = Query("opportunity"),
+    direction: str = Query("desc"),
     limit: int = Query(200, ge=1, le=1000),
     _=Depends(require_auth),
 ):
@@ -169,7 +172,28 @@ def api_flips(
     return _analytics_or_503().flips(
         window=window, min_profit=min_profit, min_bm_volume=min_bm_volume,
         category=category, tier=tier, quality=quality, search=search,
-        sort=sort, limit=limit,
+        buy_city=buy_city, sort=sort, direction=direction, limit=limit,
+    )
+
+
+@app.get("/api/cities")
+def api_cities(
+    window: str = Query("week"),
+    min_profit: int | None = None,
+    min_bm_volume: float | None = None,
+    category: str | None = None,
+    tier: int | None = None,
+    quality: int | None = None,
+    search: str | None = None,
+    top_n: int = Query(100, ge=1, le=1000),
+    _=Depends(require_auth),
+):
+    """Ranking of royal cities by how good they are to buy from."""
+    if window not in config.STAT_WINDOWS:
+        raise HTTPException(status_code=400, detail=f"unknown window '{window}'")
+    return _analytics_or_503().city_ranking(
+        window=window, min_profit=min_profit, min_bm_volume=min_bm_volume,
+        category=category, tier=tier, quality=quality, search=search, top_n=top_n,
     )
 
 

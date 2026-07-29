@@ -64,6 +64,30 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
 
 
+# Sortable columns for the flip table -> value accessor. Any of these can be
+# sorted ascending or descending from the UI.
+_FLIP_SORT_KEYS = {
+    "opportunity": lambda r: r["opportunity"],
+    "profit": lambda r: r["profit"],
+    "profit_pct": lambda r: r["profit_pct"],
+    "profit_window": lambda r: r["profit_window"],
+    "profit_pct_window": lambda r: r["profit_pct_window"],
+    "reliability": lambda r: r["reliability"],
+    "bm_volume": lambda r: r["bm_daily_volume"],
+    "buy_price": lambda r: r["buy_price"],
+    "bm_buy_now": lambda r: r["bm_buy_now"],
+    "est": lambda r: r["est_sell_hours"] if r["est_sell_hours"] is not None else float("inf"),
+    "buy_city": lambda r: r["buy_city"],
+    "name": lambda r: r["name"].lower(),
+    "tier": lambda r: (r["tier"], r["enchant"]),
+}
+
+
+def _sort_rows(rows: list[dict], sort: str, direction: str, keymap: dict) -> None:
+    keyfn = keymap.get(sort) or next(iter(keymap.values()))
+    rows.sort(key=keyfn, reverse=(direction != "asc"))
+
+
 # --------------------------------------------------------------------------
 # refresh (write path)
 # --------------------------------------------------------------------------
@@ -185,6 +209,7 @@ class Analytics:
         quality: int | None = None,
         search: str | None = None,
         sort: str = "bm_volume",
+        direction: str = "desc",
         limit: int = 200,
         offset: int = 0,
     ) -> dict:
@@ -251,15 +276,19 @@ class Analytics:
                 }
             )
 
-        sort_keys = {
-            "bm_volume": lambda r: r["bm_volume"],
-            "bm_avg": lambda r: r["bm_avg"],
-            "name": lambda r: r["name"].lower(),
-            "tier": lambda r: (r["tier"], r["enchant"]),
-        }
-        keyfn = sort_keys.get(sort, sort_keys["bm_volume"])
-        reverse = sort not in ("name", "tier")
-        rows.sort(key=keyfn, reverse=reverse)
+        if sort and sort.startswith("city:"):
+            _c = sort[5:]
+            keyfn = lambda r: r["cities"].get(_c, {}).get("avg", 0)
+        else:
+            _stat_keys = {
+                "bm_volume": lambda r: r["bm_volume"],
+                "bm_avg": lambda r: r["bm_avg"],
+                "cheapest": lambda r: r["cheapest_city_avg"],
+                "name": lambda r: r["name"].lower(),
+                "tier": lambda r: (r["tier"], r["enchant"]),
+            }
+            keyfn = _stat_keys.get(sort, _stat_keys["bm_volume"])
+        rows.sort(key=keyfn, reverse=(direction != "asc"))
 
         total = len(rows)
         page = rows[offset: offset + limit]
@@ -269,35 +298,33 @@ class Analytics:
             "total": total,
             "offset": offset,
             "limit": limit,
+            "sort": sort,
+            "direction": direction,
             "cities": config.ROYAL_CITIES,
             "rows": page,
         }
 
     # -- flip finder --------------------------------------------------------
 
-    def flips(
+    def _flip_candidates(
         self,
-        window: str = "week",
-        min_profit: int | None = None,
-        min_bm_volume: float | None = None,
-        category: str | None = None,
-        tier: int | None = None,
-        quality: int | None = None,
-        search: str | None = None,
-        sort: str = "profit_pct",
-        limit: int = 200,
-    ) -> dict:
-        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
-        min_bm_volume = (
-            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
-        )
+        window: str,
+        min_profit: int,
+        min_bm_volume: float,
+        category: str | None,
+        tier: int | None,
+        quality: int | None,
+        search: str | None,
+    ) -> list[dict]:
+        """Every profitable (item, quality, source city -> Black Market) flip,
+        one row per source city. Prices are fetched once here; both the flip
+        table and the city ranking are derived from this list."""
         now = datetime.now(timezone.utc)
         window_days = config.STAT_WINDOWS.get(window, 7)
         agg = self._aggregate(window_days)
         meta = self.storage.item_meta_map()
         current = self.storage.current_prices()
 
-        # index current prices
         bm_now: dict[tuple, dict] = {}
         city_sell: dict[tuple, list[dict]] = {}
         for r in current:
@@ -305,14 +332,13 @@ class Analytics:
             if r["city"] == config.BLACK_MARKET:
                 if r["buy_price_max"] > 0:
                     bm_now[key] = r
-            else:
-                if r["sell_price_min"] > 0:
-                    city_sell.setdefault(key, []).append(r)
+            elif r["sell_price_min"] > 0:
+                city_sell.setdefault(key, []).append(r)
 
         tax = config.SALES_TAX
         fee = config.SETUP_FEE
         search_l = (search or "").strip().lower()
-        out: list[dict] = []
+        cands: list[dict] = []
 
         for key, bm in bm_now.items():
             item_id, q = key
@@ -330,96 +356,172 @@ class Analytics:
             if bm_age is None or bm_age > config.FLIP_MAX_AGE_HOURS:
                 continue
 
-            # cheapest fresh city sell order
-            best = None
-            for r in city_sell.get(key, []):
-                age = _age_hours(r["sell_price_min_date"], now)
-                if age is None or age > config.FLIP_MAX_AGE_HOURS:
-                    continue
-                if best is None or r["sell_price_min"] < best["sell_price_min"]:
-                    best = r
-                    best_age = age
-            if best is None:
-                continue
-
-            cost = best["sell_price_min"] * (1.0 + fee)
-            if cost <= 0:
-                continue
-            bm_price_now = bm["buy_price_max"]
-            revenue_now = bm_price_now * (1.0 - tax)
-            profit_now = revenue_now - cost
-            profit_pct_now = profit_now / cost * 100.0
-
-            # weekly/window reference from history (volume-weighted)
             bm_hist = agg.get((item_id, config.BLACK_MARKET, q))
             bm_ref_price = bm_hist["vwap"] if bm_hist else 0
             bm_daily = bm_hist["daily"] if bm_hist else 0.0
-            revenue_ref = bm_ref_price * (1.0 - tax)
-            profit_ref = revenue_ref - cost
-            profit_pct_ref = (profit_ref / cost * 100.0) if cost else 0.0
-
-            if profit_now < min_profit:
-                continue
             if bm_daily < min_bm_volume:
                 continue
 
-            display = (m["name_ru"] or m["name_en"])
+            display = m["name_ru"] or m["name_en"]
             if m["enchant"]:
                 display = f"{display} .{m['enchant']}"
             if search_l and search_l not in display.lower() and search_l not in item_id.lower():
                 continue
 
-            # estimated time for the BM to absorb one unit, from its daily throughput
+            bm_price_now = bm["buy_price_max"]
+            revenue_now = bm_price_now * (1.0 - tax)
+            revenue_ref = bm_ref_price * (1.0 - tax)
             est_hours = round(24.0 / bm_daily, 2) if bm_daily > 0 else None
-
-            # reliability score 0..100
-            fresh = _clamp(1.0 - (max(bm_age, best_age) / config.FLIP_MAX_AGE_HOURS))
             liquidity = _clamp(bm_daily / _LIQUIDITY_REF)
-            stability = _clamp(profit_ref / profit_now) if profit_now > 0 else 0.0
-            score = round(100.0 * (0.40 * fresh + 0.30 * liquidity + 0.30 * stability))
 
-            out.append(
-                {
-                    "item_id": item_id,
-                    "name": display,
-                    "tier": m["tier"],
-                    "tier_label": f"T{m['tier']}",
-                    "enchant": m["enchant"],
-                    "quality": q,
-                    "quality_label": config.QUALITY_NAMES.get(q, str(q)),
-                    "category": m["category"],
-                    "category_label": config.CATEGORY_NAMES.get(m["category"], m["category"]),
-                    "buy_city": best["city"],
-                    "buy_price": best["sell_price_min"],
-                    "buy_age_h": round(best_age, 1),
-                    "bm_buy_now": bm_price_now,
-                    "bm_age_h": round(bm_age, 1),
-                    "bm_avg_window": bm_ref_price,
-                    "bm_daily_volume": round(bm_daily, 1),
-                    "est_sell_hours": est_hours,
-                    "profit": round(profit_now),
-                    "profit_pct": round(profit_pct_now, 1),
-                    "profit_window": round(profit_ref),
-                    "profit_pct_window": round(profit_pct_ref, 1),
-                    "reliability": score,
-                }
-            )
+            for r in city_sell.get(key, []):
+                age = _age_hours(r["sell_price_min_date"], now)
+                if age is None or age > config.FLIP_MAX_AGE_HOURS:
+                    continue
+                cost = r["sell_price_min"] * (1.0 + fee)
+                if cost <= 0:
+                    continue
+                profit_now = revenue_now - cost
+                if profit_now < min_profit:
+                    continue
+                profit_pct_now = profit_now / cost * 100.0
+                profit_ref = revenue_ref - cost
+                profit_pct_ref = profit_ref / cost * 100.0
 
-        sort_keys = {
-            "profit_pct": lambda r: r["profit_pct"],
-            "profit": lambda r: r["profit"],
-            "reliability": lambda r: r["reliability"],
-            "bm_volume": lambda r: r["bm_daily_volume"],
-        }
-        keyfn = sort_keys.get(sort, sort_keys["profit_pct"])
-        out.sort(key=keyfn, reverse=True)
+                fresh = _clamp(1.0 - (max(bm_age, age) / config.FLIP_MAX_AGE_HOURS))
+                stability = _clamp(profit_ref / profit_now) if profit_now > 0 else 0.0
+                score = round(100.0 * (0.40 * fresh + 0.30 * liquidity + 0.30 * stability))
+
+                cands.append(
+                    {
+                        "item_id": item_id,
+                        "name": display,
+                        "tier": m["tier"],
+                        "tier_label": f"T{m['tier']}",
+                        "enchant": m["enchant"],
+                        "quality": q,
+                        "quality_label": config.QUALITY_NAMES.get(q, str(q)),
+                        "category": m["category"],
+                        "category_label": config.CATEGORY_NAMES.get(m["category"], m["category"]),
+                        "buy_city": r["city"],
+                        "buy_price": r["sell_price_min"],
+                        "buy_age_h": round(age, 1),
+                        "bm_buy_now": bm_price_now,
+                        "bm_age_h": round(bm_age, 1),
+                        "bm_avg_window": bm_ref_price,
+                        "bm_daily_volume": round(bm_daily, 1),
+                        "est_sell_hours": est_hours,
+                        "profit": round(profit_now),
+                        "profit_pct": round(profit_pct_now, 1),
+                        "profit_window": round(profit_ref),
+                        "profit_pct_window": round(profit_pct_ref, 1),
+                        "reliability": score,
+                        # composite "worth it" score: expected profit discounted
+                        # by how trustworthy/liquid the flip is (profit x score).
+                        "opportunity": round(profit_now * score / 100.0),
+                    }
+                )
+        return cands
+
+    def flips(
+        self,
+        window: str = "week",
+        min_profit: int | None = None,
+        min_bm_volume: float | None = None,
+        category: str | None = None,
+        tier: int | None = None,
+        quality: int | None = None,
+        search: str | None = None,
+        buy_city: str | None = None,
+        sort: str = "opportunity",
+        direction: str = "desc",
+        limit: int = 200,
+    ) -> dict:
+        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
+        min_bm_volume = (
+            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
+        )
+        cands = self._flip_candidates(
+            window, min_profit, min_bm_volume, category, tier, quality, search
+        )
+        if buy_city:
+            rows = [c for c in cands if c["buy_city"] == buy_city]
+        else:
+            # collapse to the single best source city per (item, quality)
+            best: dict[tuple, dict] = {}
+            for c in cands:
+                k = (c["item_id"], c["quality"])
+                cur = best.get(k)
+                if cur is None or c["opportunity"] > cur["opportunity"]:
+                    best[k] = c
+            rows = list(best.values())
+
+        _sort_rows(rows, sort, direction, _FLIP_SORT_KEYS)
 
         return {
             "window": window,
-            "window_days": window_days,
-            "sales_tax": tax,
+            "window_days": config.STAT_WINDOWS.get(window, 7),
+            "sales_tax": config.SALES_TAX,
             "min_profit": min_profit,
             "min_bm_volume": min_bm_volume,
+            "buy_city": buy_city,
+            "sort": sort,
+            "direction": direction,
+            "total": len(rows),
+            "rows": rows[:limit],
+        }
+
+    def city_ranking(
+        self,
+        window: str = "week",
+        min_profit: int | None = None,
+        min_bm_volume: float | None = None,
+        category: str | None = None,
+        tier: int | None = None,
+        quality: int | None = None,
+        search: str | None = None,
+        top_n: int = 100,
+    ) -> dict:
+        """Rank royal cities as a buy base. Each city's best `top_n` flips
+        (by opportunity = profit x reliability) are summed, so the city that
+        offers the most realizable profit across items ranks first."""
+        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
+        min_bm_volume = (
+            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
+        )
+        cands = self._flip_candidates(
+            window, min_profit, min_bm_volume, category, tier, quality, search
+        )
+        from collections import defaultdict
+
+        buckets: dict[str, list[dict]] = defaultdict(list)
+        for c in cands:
+            buckets[c["buy_city"]].append(c)
+
+        out: list[dict] = []
+        for city, lst in buckets.items():
+            lst.sort(key=lambda x: x["opportunity"], reverse=True)
+            top = lst[:top_n]
+            n = len(top)
+            best = top[0] if top else None
+            out.append(
+                {
+                    "city": city,
+                    "flips_count": len(lst),
+                    "score": sum(x["opportunity"] for x in top),
+                    "top_profit_sum": sum(x["profit"] for x in top),
+                    "avg_profit_pct": round(sum(x["profit_pct"] for x in top) / n, 1) if n else 0.0,
+                    "avg_reliability": round(sum(x["reliability"] for x in top) / n) if n else 0,
+                    "best_item": best["name"] if best else "",
+                    "best_profit": best["profit"] if best else 0,
+                    "best_profit_pct": best["profit_pct"] if best else 0.0,
+                }
+            )
+        out.sort(key=lambda r: r["score"], reverse=True)
+        return {
+            "window": window,
+            "window_days": config.STAT_WINDOWS.get(window, 7),
+            "top_n": top_n,
             "total": len(out),
-            "rows": out[:limit],
+            "rows": out,
         }

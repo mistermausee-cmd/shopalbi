@@ -20,27 +20,23 @@ const cityName = (c) => CITY_SHORT[c] || c;
 
 function timeAgo(iso) {
   if (!iso) return 'нет данных';
-  const then = new Date(iso).getTime();
-  const diff = Math.max(0, (Date.now() - then) / 1000);
+  const diff = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
   if (diff < 60) return 'только что';
   if (diff < 3600) return `${Math.floor(diff / 60)} мин назад`;
   if (diff < 86400) return `${Math.floor(diff / 3600)} ч назад`;
   return `${Math.floor(diff / 86400)} д назад`;
 }
-
 function estTime(hours) {
   if (hours === null || hours === undefined) return '—';
   if (hours < 1) return `~${Math.round(hours * 60)} мин`;
   if (hours < 48) return `~${hours.toFixed(1)} ч`;
   return `~${(hours / 24).toFixed(1)} дн`;
 }
-
 function scoreColor(v) {
   if (v >= 70) return 'var(--green)';
   if (v >= 45) return 'var(--gold)';
   return 'var(--red)';
 }
-
 function toast(msg, kind = '') {
   const t = $('#toast');
   t.textContent = msg;
@@ -49,13 +45,10 @@ function toast(msg, kind = '') {
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { t.hidden = true; }, 3500);
 }
-
 function debounce(fn, ms) {
   let t;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
-
-// fetch JSON with a hard timeout so a stalled request can never hang the UI
 async function fetchJSON(url, timeoutMs = 25000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -71,88 +64,79 @@ async function fetchJSON(url, timeoutMs = 25000) {
 // ---- state ----------------------------------------------------------------
 
 const state = {
-  view: 'flips',        // 'flips' | 'stats'
+  view: 'flips',                 // 'flips' | 'cities' | 'stats'
   window: 'day',
-  sort: { flips: 'profit_pct', stats: 'bm_volume' },
+  sort: {
+    flips: { key: 'opportunity', dir: 'desc' },
+    stats: { key: 'bm_volume', dir: 'desc' },
+    cities: { key: 'score', dir: 'desc' },
+  },
   meta: null,
   cities: [],
+  rows: [],                      // last loaded rows (for client-side sort of the cities tab)
   loading: false,
 };
 
-// ---- column definitions ---------------------------------------------------
+// columns whose natural first-click direction is ascending (lower = better / text)
+const ASC_FIRST = new Set(['name', 'buy_city', 'city', 'best_item', 'buy_price', 'est', 'cheapest']);
 
-const FLIP_COLS = [
-  { key: 'name', label: 'Предмет', left: true, sortable: false, render: renderNameCell },
-  { key: 'buy_city', label: 'Купить в', left: true, sortable: false,
-    render: (r) => `<span class="city-tag">${cityName(r.buy_city)}</span>` },
-  { key: 'buy_price', label: 'Цена покупки', sortable: false,
-    render: (r) => `<span class="num">${fmt(r.buy_price)}</span>` },
-  { key: 'bm_buy_now', label: 'Выкуп ЧР', sortable: false,
-    render: (r) => `<span class="num">${fmt(r.bm_buy_now)}</span>` },
-  { key: 'profit', label: 'Прибыль', sortable: true, render: renderProfitCell },
-  { key: 'profit_pct', label: 'Прибыль %', sortable: true,
-    render: (r) => profitPct(r.profit_pct) },
-  { key: 'profit_window', label: 'Прибыль (за период)', sortable: false, render: renderWindowProfitCell },
-  { key: 'bm_volume', label: 'ЧР шт/день', sortable: true,
-    render: (r) => `<span class="num cell-dim">${r.bm_daily_volume}</span>` },
-  { key: 'est', label: '~Время выкупа', sortable: false,
-    render: (r) => `<span class="cell-dim">${estTime(r.est_sell_hours)}</span>` },
-  { key: 'reliability', label: 'Надёжность', sortable: true, render: renderScoreCell },
-];
-
-function flipStatsColsBase() {
-  return [
-    { key: 'name', label: 'Предмет', left: true, sortable: false, render: renderNameCell },
-    { key: 'bm_avg', label: 'ЧР средняя', sortable: true,
-      render: (r) => `<span class="num">${fmt(r.bm_avg)}</span>` },
-    { key: 'bm_volume', label: 'ЧР объём', sortable: true,
-      render: (r) => `<span class="num cell-dim">${fmt(r.bm_volume)}</span>` },
-  ];
-}
+// ---- cell renderers -------------------------------------------------------
 
 function renderNameCell(r) {
   const q = `<span class="q-badge q${r.quality}" title="${r.quality_label}"></span>`;
   return `<div class="item-name">${q}${r.name}</div>` +
-         `<div class="item-sub"><span class="pill tier">${r.tier_label}</span> ` +
-         `<span class="pill cat">${r.category_label}</span> · ${r.quality_label}</div>`;
+    `<div class="item-sub"><span class="pill tier">${r.tier_label}</span> ` +
+    `<span class="pill cat">${r.category_label}</span> · ${r.quality_label}</div>`;
 }
-function profitPct(v) {
-  const cls = v >= 0 ? 'profit-pos' : 'profit-neg';
-  return `<span class="num ${cls}">${v >= 0 ? '+' : ''}${v}%</span>`;
-}
-function renderProfitCell(r) {
-  const cls = r.profit >= 0 ? 'profit-pos' : 'profit-neg';
-  return `<span class="num ${cls}">${r.profit >= 0 ? '+' : ''}${fmt(r.profit)}</span>`;
-}
-function renderWindowProfitCell(r) {
-  const cls = r.profit_window >= 0 ? 'profit-pos' : 'profit-neg';
-  return `<span class="num ${cls}">${r.profit_window >= 0 ? '+' : ''}${fmt(r.profit_window)}</span>` +
-         ` <span class="pct cell-dim">(${r.profit_pct_window}%)</span>`;
-}
-function renderScoreCell(r) {
-  const v = r.reliability;
+function profitCls(v) { return v >= 0 ? 'profit-pos' : 'profit-neg'; }
+function signed(v) { return `${v >= 0 ? '+' : ''}${fmt(v)}`; }
+function renderScoreCell(v) {
   const col = scoreColor(v);
-  return `<div class="score"><span class="score-bar"><i style="width:${v}%;background:${col}"></i></span>` +
-         `<span class="score-val" style="color:${col}">${v}</span></div>`;
+  return `<div class="score"><span class="score-bar"><i style="width:${Math.max(0, v)}%;background:${col}"></i></span>` +
+    `<span class="score-val" style="color:${col}">${v}</span></div>`;
 }
 
-// ---- rendering ------------------------------------------------------------
+// ---- column definitions ---------------------------------------------------
 
-function buildColumns() {
-  if (state.view === 'flips') return FLIP_COLS;
-  const cols = flipStatsColsBase();
+function flipColumns() {
+  return [
+    { key: 'name', label: 'Предмет', left: true, render: renderNameCell },
+    { key: 'opportunity', label: 'Выгодность', hint: 'Совокупная оценка: прибыль × надёжность',
+      render: (r) => `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.opportunity)}</span>` },
+    { key: 'buy_city', label: 'Купить в', left: true,
+      render: (r) => `<span class="city-tag">${cityName(r.buy_city)}</span>` },
+    { key: 'buy_price', label: 'Цена покупки', render: (r) => `<span class="num">${fmt(r.buy_price)}</span>` },
+    { key: 'bm_buy_now', label: 'Выкуп ЧР', render: (r) => `<span class="num">${fmt(r.bm_buy_now)}</span>` },
+    { key: 'profit', label: 'Прибыль',
+      render: (r) => `<span class="num ${profitCls(r.profit)}">${signed(r.profit)}</span>` },
+    { key: 'profit_pct', label: 'Прибыль %',
+      render: (r) => `<span class="num ${profitCls(r.profit_pct)}">${r.profit_pct >= 0 ? '+' : ''}${r.profit_pct}%</span>` },
+    { key: 'profit_window', label: 'Прибыль (за период)',
+      render: (r) => `<span class="num ${profitCls(r.profit_window)}">${signed(r.profit_window)}</span>` +
+        ` <span class="pct cell-dim">(${r.profit_pct_window}%)</span>` },
+    { key: 'bm_volume', label: 'ЧР шт/день', render: (r) => `<span class="num cell-dim">${r.bm_daily_volume}</span>` },
+    { key: 'est', label: '~Время выкупа', render: (r) => `<span class="cell-dim">${estTime(r.est_sell_hours)}</span>` },
+    { key: 'reliability', label: 'Надёжность', render: (r) => renderScoreCell(r.reliability) },
+  ];
+}
+
+function statsColumns() {
+  const cols = [
+    { key: 'name', label: 'Предмет', left: true, render: renderNameCell },
+    { key: 'bm_avg', label: 'ЧР средняя', render: (r) => `<span class="num">${fmt(r.bm_avg)}</span>` },
+    { key: 'bm_volume', label: 'ЧР объём', render: (r) => `<span class="num cell-dim">${fmt(r.bm_volume)}</span>` },
+  ];
   for (const c of state.cities) {
     cols.push({
-      key: 'city:' + c, label: cityName(c), sortable: false,
+      key: 'city:' + c, label: cityName(c),
       render: (r) => {
         const e = r.cities[c];
-        if (!e || !e.avg) return '<span class="cell-dim">—</span>';
-        return `<span class="num">${fmt(e.avg)}</span>`;
+        return e && e.avg ? `<span class="num">${fmt(e.avg)}</span>` : '<span class="cell-dim">—</span>';
       },
     });
   }
   cols.push({
-    key: 'cheapest', label: 'Дешевле всего', left: true, sortable: false,
+    key: 'cheapest', label: 'Дешевле всего', left: true,
     render: (r) => r.cheapest_city
       ? `<span class="city-tag">${cityName(r.cheapest_city)}</span> <span class="num cell-dim">${fmt(r.cheapest_city_avg)}</span>`
       : '<span class="cell-dim">—</span>',
@@ -160,21 +144,79 @@ function buildColumns() {
   return cols;
 }
 
+function cityColumns() {
+  return [
+    { key: 'city', label: 'Город закупки', left: true, value: (r) => cityName(r.city),
+      render: (r) => `<span class="city-tag" style="font-size:14px">${cityName(r.city)}</span>` },
+    { key: 'score', label: 'Выгодность (сумма)', value: (r) => r.score, hint: 'Сумма выгодности по лучшим флипам города',
+      render: (r) => `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.score)}</span>` },
+    { key: 'flips_count', label: 'Флипов доступно', value: (r) => r.flips_count,
+      render: (r) => `<span class="num">${fmt(r.flips_count)}</span>` },
+    { key: 'top_profit_sum', label: 'Прибыль топ-100', value: (r) => r.top_profit_sum,
+      render: (r) => `<span class="num profit-pos">${signed(r.top_profit_sum)}</span>` },
+    { key: 'avg_profit_pct', label: 'Средний %', value: (r) => r.avg_profit_pct,
+      render: (r) => `<span class="num">${r.avg_profit_pct}%</span>` },
+    { key: 'avg_reliability', label: 'Ср. надёжность', value: (r) => r.avg_reliability,
+      render: (r) => renderScoreCell(r.avg_reliability) },
+    { key: 'best_item', label: 'Лучший предмет', left: true, value: (r) => r.best_item,
+      render: (r) => `<div class="item-name">${r.best_item || '—'}</div>` +
+        (r.best_item ? `<div class="item-sub profit-pos">${signed(r.best_profit)} (${r.best_profit_pct}%)</div>` : '') },
+  ];
+}
+
+function buildColumns() {
+  if (state.view === 'flips') return flipColumns();
+  if (state.view === 'cities') return cityColumns();
+  return statsColumns();
+}
+
+// ---- rendering ------------------------------------------------------------
+
 function renderHead(cols) {
-  const sortKey = state.sort[state.view];
+  const s = state.sort[state.view];
   $('#thead').innerHTML = '<tr>' + cols.map((c) => {
-    const cls = [c.left ? 'left' : '', c.sortable && c.key === sortKey ? 'sorted' : ''].join(' ').trim();
-    const arrow = c.sortable ? (c.key === sortKey ? ' <span class="arrow">▼</span>' : ' <span class="arrow" style="opacity:.25">▽</span>') : '';
-    const attr = c.sortable ? ` data-sort="${c.key}"` : '';
-    return `<th class="${cls}"${attr}>${c.label}${arrow}</th>`;
+    const sorted = c.key === s.key;
+    const cls = [c.left ? 'left' : '', sorted ? 'sorted' : ''].join(' ').trim();
+    const arrow = sorted
+      ? ` <span class="arrow">${s.dir === 'asc' ? '▲' : '▼'}</span>`
+      : ' <span class="arrow" style="opacity:.25">▽</span>';
+    const title = c.hint ? ` title="${c.hint}"` : '';
+    return `<th class="${cls}" data-sort="${c.key}"${title}>${c.label}${arrow}</th>`;
   }).join('') + '</tr>';
 
   $('#thead').querySelectorAll('th[data-sort]').forEach((th) => {
-    th.addEventListener('click', () => {
-      state.sort[state.view] = th.dataset.sort;
-      load();
-    });
+    th.addEventListener('click', () => onSort(th.dataset.sort));
   });
+}
+
+function onSort(key) {
+  const s = state.sort[state.view];
+  if (s.key === key) {
+    s.dir = s.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    s.key = key;
+    s.dir = ASC_FIRST.has(key) ? 'asc' : 'desc';
+  }
+  if (state.view === 'cities') {
+    renderCurrent();          // client-side sort, no refetch
+  } else {
+    load();                   // server-side sort
+  }
+}
+
+function sortedRows(cols) {
+  if (state.view !== 'cities') return state.rows;   // already sorted server-side
+  const s = state.sort.cities;
+  const col = cols.find((c) => c.key === s.key);
+  const rows = state.rows.slice();
+  if (col && col.value) {
+    rows.sort((a, b) => {
+      const av = col.value(a), bv = col.value(b);
+      let r = typeof av === 'string' ? av.localeCompare(bv, 'ru') : (av - bv);
+      return s.dir === 'asc' ? r : -r;
+    });
+  }
+  return rows;
 }
 
 function renderRows(cols, rows) {
@@ -184,7 +226,7 @@ function renderRows(cols, rows) {
     e.hidden = false;
     e.textContent = state.view === 'flips'
       ? 'Флипов по текущим фильтрам нет. Снизьте мин. прибыль или дождитесь обновления данных.'
-      : 'Нет данных по этим фильтрам.';
+      : (state.view === 'cities' ? 'Нет данных по городам под эти фильтры.' : 'Нет данных по этим фильтрам.');
     return;
   }
   $('#emptyState').hidden = true;
@@ -193,12 +235,17 @@ function renderRows(cols, rows) {
   ).join('');
 }
 
+function renderCurrent() {
+  const cols = buildColumns();
+  renderHead(cols);
+  renderRows(cols, sortedRows(cols));
+}
+
 // ---- data ----------------------------------------------------------------
 
 function currentFilters() {
   const p = new URLSearchParams();
   p.set('window', state.window);
-  p.set('limit', '300');
   const search = $('#search').value.trim();
   const category = $('#category').value;
   const tier = $('#tier').value;
@@ -207,27 +254,38 @@ function currentFilters() {
   if (category) p.set('category', category);
   if (tier) p.set('tier', tier);
   if (quality) p.set('quality', quality);
-  p.set('sort', state.sort[state.view]);
+
+  if (state.view === 'cities') {
+    p.set('top_n', '100');
+    const mp = $('#minProfit').value;
+    if (mp !== '') p.set('min_profit', mp);
+    return p;
+  }
+
+  p.set('limit', '300');
+  const s = state.sort[state.view];
+  p.set('sort', s.key);
+  p.set('direction', s.dir);
   if (state.view === 'flips') {
     const mp = $('#minProfit').value;
     if (mp !== '') p.set('min_profit', mp);
+    const bc = $('#buyCity').value;
+    if (bc) p.set('buy_city', bc);
   }
   return p;
 }
 
+const ENDPOINT = { flips: '/api/flips', cities: '/api/cities', stats: '/api/stats' };
+
 async function load() {
   if (state.loading) return;
   state.loading = true;
-  // Only show the blocking overlay on the first load / when the table is empty,
-  // so re-filtering doesn't flash a spinner over data that's already there.
   const showOverlay = !$('#tbody').children.length;
   if (showOverlay) $('#loader').hidden = false;
-  const endpoint = state.view === 'flips' ? '/api/flips' : '/api/stats';
   try {
-    const data = await fetchJSON(`${endpoint}?${currentFilters().toString()}`);
-    const cols = buildColumns();
-    renderHead(cols);
-    renderRows(cols, data.rows || []);
+    const data = await fetchJSON(`${ENDPOINT[state.view]}?${currentFilters().toString()}`);
+    state.rows = data.rows || [];
+    renderCurrent();
     updateMetaLine(data);
   } catch (err) {
     const msg = err.name === 'AbortError' ? 'сервер не ответил вовремя' : err.message;
@@ -238,20 +296,25 @@ async function load() {
     }
   } finally {
     state.loading = false;
-    $('#loader').hidden = true;   // always clear the overlay
+    $('#loader').hidden = true;
   }
 }
 
 function updateMetaLine(data) {
   const wl = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц' }[state.window];
   if (state.view === 'flips') {
+    const where = data.buy_city ? ` · закупка в <b>${cityName(data.buy_city)}</b>` : ' · лучший город по каждому предмету';
     $('#metaLine').innerHTML =
-      `Найдено флипов: <b>${data.total}</b> · выручка после налога <b>${((1 - data.sales_tax) * 100).toFixed(0)}%</b> ` +
-      `· «Прибыль (за период)» считается по средней цене ЧР за ${wl} — стабильность против разового скачка.`;
+      `Найдено флипов: <b>${data.total}</b>${where} · выручка после налога <b>${((1 - data.sales_tax) * 100).toFixed(0)}%</b>` +
+      ` · «Выгодность» = прибыль × надёжность, «Прибыль (за период)» — по средней цене ЧР за ${wl}.`;
+  } else if (state.view === 'cities') {
+    $('#metaLine').innerHTML =
+      `Города отсортированы по совокупной выгодности (сумма по лучшим 100 флипам города) за ${wl}. ` +
+      `Начинай с верхнего — там больше всего выгодных вещей.`;
   } else {
     $('#metaLine').innerHTML =
       `Показано предметов: <b>${data.rows.length}</b> из <b>${data.total}</b> · ` +
-      `цены — средневзвешенные по объёму за ${wl}.`;
+      `цены — средневзвешенные по объёму за ${wl}. Клик по городу — сортировка по его цене.`;
   }
 }
 
@@ -259,18 +322,15 @@ function updateMetaLine(data) {
 
 async function pollStatus() {
   try {
-    const res = await fetch('/api/status');
-    if (!res.ok) throw new Error();
-    const s = await res.json();
+    const s = await fetchJSON('/api/status', 8000);
     const dot = $('#statusDot');
-    const cur = s.current_refreshed_at;
-    if (!cur || s.current_rows === 0) {
+    if (!s.current_refreshed_at || s.current_rows === 0) {
       dot.className = 'dot warn';
       $('#statusText').textContent = `Каталог: ${fmt(s.items)} предметов · сбор данных…`;
     } else {
       dot.className = 'dot ok';
       $('#statusText').textContent =
-        `Цены: ${timeAgo(cur)} · история: ${timeAgo(s.history_refreshed_at)} · ${fmt(s.items)} предметов`;
+        `Цены: ${timeAgo(s.current_refreshed_at)} · история: ${timeAgo(s.history_refreshed_at)} · ${fmt(s.items)} предметов`;
     }
     $('#taxNote').textContent = `Налог продажи ЧР (премиум): ${(s.sales_tax * 100).toFixed(0)}%`;
   } catch {
@@ -283,10 +343,11 @@ async function pollStatus() {
 
 async function initMeta() {
   try {
-    const res = await fetch('/api/meta');
-    const m = await res.json();
+    const m = await fetchJSON('/api/meta');
     state.meta = m;
     state.cities = m.cities;
+    const buyCity = $('#buyCity');
+    for (const c of m.cities) buyCity.insertAdjacentHTML('beforeend', `<option value="${c}">${cityName(c)}</option>`);
     const cat = $('#category');
     for (const c of m.categories) cat.insertAdjacentHTML('beforeend', `<option value="${c.id}">${c.label}</option>`);
     const tier = $('#tier');
@@ -298,6 +359,12 @@ async function initMeta() {
   }
 }
 
+function updateControlsVisibility() {
+  // Buy-city filter and min-profit only make sense on the flip / city tabs
+  $('#buyCity').style.display = state.view === 'flips' ? '' : 'none';
+  $('#minProfitWrap').style.display = state.view === 'stats' ? 'none' : '';
+}
+
 function wireEvents() {
   $('#mainTabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
@@ -305,7 +372,9 @@ function wireEvents() {
     document.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
     btn.classList.add('active');
     state.view = btn.dataset.view;
-    $('#minProfitWrap').style.display = state.view === 'flips' ? '' : 'none';
+    state.rows = [];
+    $('#tbody').innerHTML = '';
+    updateControlsVisibility();
     load();
   });
 
@@ -320,6 +389,7 @@ function wireEvents() {
 
   const deb = debounce(load, 350);
   $('#search').addEventListener('input', deb);
+  $('#buyCity').addEventListener('change', load);
   $('#category').addEventListener('change', load);
   $('#tier').addEventListener('change', load);
   $('#quality').addEventListener('change', load);
@@ -340,6 +410,7 @@ function wireEvents() {
 
 (async function main() {
   wireEvents();
+  updateControlsVisibility();
   await initMeta();
   await pollStatus();
   await load();
