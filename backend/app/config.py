@@ -41,6 +41,14 @@ DB_PATH = Path(_get("SHOPALBI_DB_PATH", str(DATA_DIR / "shopalbi.db")))
 CATALOG_CACHE = Path(_get("SHOPALBI_CATALOG_CACHE", str(DATA_DIR / "items.json")))
 FRONTEND_DIR = Path(_get("SHOPALBI_FRONTEND_DIR", str(REPO_ROOT / "frontend")))
 
+# Where the rotating log file is written. Defaults to the data dir; in Docker
+# this is bind-mounted to /root/logs on the host so logs are readable there.
+LOG_DIR = Path(_get("SHOPALBI_LOG_DIR", str(DATA_DIR)))
+try:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+
 
 # --- Albion Online Data Project API ----------------------------------------
 

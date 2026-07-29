@@ -7,12 +7,15 @@ services:
       - "8000:8000"
     volumes:
       - shopalbi-data:/data
+      # host:container — log files land in /root/logs on the VPS
+      - /root/logs:/logs
     environment:
       # EU server + Premium tax (4%). Override any of these as needed.
       - SHOPALBI_API_HOST=https://europe.albion-online-data.com
       - SHOPALBI_SALES_TAX=0.04
       - SHOPALBI_CURRENT_REFRESH_MINUTES=10
       - SHOPALBI_HISTORY_REFRESH_HOURS=12
+      - SHOPALBI_LOG_DIR=/logs
       # Optional password protection (leave empty to keep the site open):
       # - SHOPALBI_AUTH_USER=admin
       # - SHOPALBI_AUTH_PASS=change-me

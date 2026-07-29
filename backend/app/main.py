@@ -30,7 +30,7 @@ from .storage import Storage
 # errors can be inspected even without `docker compose logs`.
 _handlers: list[logging.Handler] = [logging.StreamHandler()]
 try:
-    _log_path = config.DATA_DIR / "shopalbi.log"
+    _log_path = config.LOG_DIR / "shopalbi.log"
     _handlers.append(
         RotatingFileHandler(_log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
     )
