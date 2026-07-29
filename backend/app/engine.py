@@ -21,6 +21,7 @@ trades cannot skew the number.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -62,6 +63,16 @@ def _age_hours(s: str | None, now: datetime) -> float | None:
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
+
+
+# Localized item names end with the tier word in parentheses, e.g.
+# "Куртка убийцы (магистр)". That duplicates the tier badge and confuses the
+# reader, so we strip it and show a clean "Т7.3" tier.enchant label instead.
+_PAREN_TAIL_RE = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def _clean_name(name: str) -> str:
+    return _PAREN_TAIL_RE.sub("", name or "").strip()
 
 
 # Sortable columns for the flip table -> value accessor. Any of these can be
@@ -243,9 +254,7 @@ class Analytics:
                 continue
             if quality and q != quality:
                 continue
-            display = (m["name_ru"] or m["name_en"])
-            if m["enchant"]:
-                display = f"{display} .{m['enchant']}"
+            display = _clean_name(m["name_ru"] or m["name_en"])
             if search_l and search_l not in display.lower() and search_l not in item_id.lower():
                 continue
             bm_vol = g["bm"]["volume"] if g["bm"] else 0
@@ -262,6 +271,7 @@ class Analytics:
                     "name": display,
                     "tier": m["tier"],
                     "tier_label": f"T{m['tier']}",
+                    "tier_ench": f"Т{m['tier']}.{m['enchant']}",
                     "enchant": m["enchant"],
                     "quality": q,
                     "quality_label": config.QUALITY_NAMES.get(q, str(q)),
@@ -362,23 +372,25 @@ class Analytics:
             if bm_daily < min_bm_volume:
                 continue
 
-            display = m["name_ru"] or m["name_en"]
-            if m["enchant"]:
-                display = f"{display} .{m['enchant']}"
+            display = _clean_name(m["name_ru"] or m["name_en"])
+            tier_ench = f"Т{m['tier']}.{m['enchant']}"
             if search_l and search_l not in display.lower() and search_l not in item_id.lower():
                 continue
 
+            net = 1.0 - tax - fee  # Black Market sale net of sales tax + setup fee
             bm_price_now = bm["buy_price_max"]
-            revenue_now = bm_price_now * (1.0 - tax)
-            revenue_ref = bm_ref_price * (1.0 - tax)
+            revenue_now = bm_price_now * net
+            revenue_ref = bm_ref_price * net
             est_hours = round(24.0 / bm_daily, 2) if bm_daily > 0 else None
             liquidity = _clamp(bm_daily / _LIQUIDITY_REF)
 
             for r in city_sell.get(key, []):
+                if r["city"] not in config.BUY_CITIES:
+                    continue
                 age = _age_hours(r["sell_price_min_date"], now)
                 if age is None or age > config.FLIP_MAX_AGE_HOURS:
                     continue
-                cost = r["sell_price_min"] * (1.0 + fee)
+                cost = r["sell_price_min"]   # buying from an existing sell order has no fee
                 if cost <= 0:
                     continue
                 profit_now = revenue_now - cost
@@ -398,6 +410,7 @@ class Analytics:
                         "name": display,
                         "tier": m["tier"],
                         "tier_label": f"T{m['tier']}",
+                        "tier_ench": tier_ench,
                         "enchant": m["enchant"],
                         "quality": q,
                         "quality_label": config.QUALITY_NAMES.get(q, str(q)),
@@ -524,4 +537,132 @@ class Analytics:
             "top_n": top_n,
             "total": len(out),
             "rows": out,
+        }
+
+    # -- budget recommender -------------------------------------------------
+
+    def recommend(
+        self,
+        budget: int,
+        city: str | None = None,
+        window: str = "week",
+        min_profit: int | None = None,
+        min_bm_volume: float | None = None,
+        category: str | None = None,
+        tier: int | None = None,
+        quality: int | None = None,
+        search: str | None = None,
+        slippage: float | None = None,
+        capture: float | None = None,
+    ) -> dict:
+        """Given a budget, decide which city to shop in and exactly what to buy
+        (item + quantity) to maximise expected profit, then re-sell on the Black
+        Market. Quantities are bounded by the Black Market's daily throughput and
+        an average buy price that rises with quantity (slippage), because the API
+        exposes only the single lowest sell price, not full order-book depth."""
+        min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
+        min_bm_volume = (
+            config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
+        )
+        slippage = config.RECOMMEND_SLIPPAGE if slippage is None else slippage
+        capture = config.RECOMMEND_VOLUME_CAPTURE if capture is None else capture
+        budget = max(0, int(budget or 0))
+
+        cands = self._flip_candidates(
+            window, min_profit, min_bm_volume, category, tier, quality, search
+        )
+        from collections import defaultdict
+
+        by_city: dict[str, list[dict]] = defaultdict(list)
+        for c in cands:
+            by_city[c["buy_city"]].append(c)
+
+        cities = [city] if city else list(by_city.keys())
+        plans = [
+            {**self._allocate_budget(by_city.get(cy, []), budget, slippage, capture), "city": cy}
+            for cy in cities
+        ]
+        plans.sort(key=lambda p: p["expected_profit"], reverse=True)
+        best = plans[0] if plans else None
+        return {
+            "window": window,
+            "budget": budget,
+            "sales_tax": config.SALES_TAX,
+            "setup_fee": config.SETUP_FEE,
+            "requested_city": city,
+            "city": best["city"] if best else None,
+            "best": best,
+            "cities": [
+                {k: p[k] for k in ("city", "expected_profit", "spent", "leftover", "roi_pct", "items_count")}
+                for p in plans
+            ],
+        }
+
+    @staticmethod
+    def _allocate_budget(candidates: list[dict], budget: int, slippage: float, capture: float) -> dict:
+        # Spend on the most silver-efficient flips first (profit per silver),
+        # capped per item by how much the Black Market can realistically absorb.
+        ranked = sorted(
+            candidates,
+            key=lambda c: (c["profit"] / c["buy_price"] if c["buy_price"] else 0.0, c["reliability"]),
+            reverse=True,
+        )
+        net = 1.0 - config.SALES_TAX - config.SETUP_FEE
+        remaining = float(budget)
+        items: list[dict] = []
+        spent = 0.0
+        profit_total = 0.0
+
+        for c in ranked:
+            price = c["buy_price"]
+            if price <= 0 or remaining < price:
+                continue
+            vol = max(1.0, c["bm_daily_volume"])
+            vol_cap = max(1, int(round(vol * capture)))
+            qty = min(vol_cap, int(remaining // price))
+            if qty < 1:
+                continue
+            # average buy price rises with the share of daily volume you take
+            avg_price = price * (1.0 + slippage * (qty / vol))
+            if avg_price * qty > remaining:
+                qty = int(remaining // avg_price)
+                if qty < 1:
+                    continue
+            cost = avg_price * qty
+            unit_profit = c["bm_buy_now"] * net - avg_price
+            if unit_profit <= 0:
+                continue
+            total_profit = unit_profit * qty
+            items.append(
+                {
+                    "item_id": c["item_id"],
+                    "name": c["name"],
+                    "tier_ench": c["tier_ench"],
+                    "quality": c["quality"],
+                    "quality_label": c["quality_label"],
+                    "category_label": c["category_label"],
+                    "qty": qty,
+                    "unit_price": price,
+                    "avg_price": round(avg_price),
+                    "total_cost": round(cost),
+                    "bm_buy_now": c["bm_buy_now"],
+                    "unit_profit": round(unit_profit),
+                    "total_profit": round(total_profit),
+                    "profit_pct": round(unit_profit / avg_price * 100, 1) if avg_price else 0.0,
+                    "bm_daily_volume": c["bm_daily_volume"],
+                    "reliability": c["reliability"],
+                }
+            )
+            spent += cost
+            remaining -= cost
+            profit_total += total_profit
+
+        items.sort(key=lambda x: x["total_profit"], reverse=True)
+        return {
+            "expected_profit": round(profit_total),
+            "spent": round(spent),
+            "leftover": round(budget - spent),
+            "roi_pct": round(profit_total / spent * 100, 1) if spent else 0.0,
+            "items_count": len(items),
+            "items": items,
         }

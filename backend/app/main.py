@@ -120,6 +120,7 @@ def api_meta(_=Depends(require_auth)):
     """Static reference data for the frontend (cities, qualities, categories)."""
     return {
         "cities": config.ROYAL_CITIES,
+        "buy_cities": config.BUY_CITIES,
         "black_market": config.BLACK_MARKET,
         "qualities": [{"id": q, "label": config.QUALITY_NAMES[q]} for q in config.QUALITIES],
         "tiers": config.TIERS,
@@ -194,6 +195,30 @@ def api_cities(
     return _analytics_or_503().city_ranking(
         window=window, min_profit=min_profit, min_bm_volume=min_bm_volume,
         category=category, tier=tier, quality=quality, search=search, top_n=top_n,
+    )
+
+
+@app.get("/api/recommend")
+def api_recommend(
+    budget: int = Query(..., ge=0),
+    city: str | None = None,
+    window: str = Query("week"),
+    min_profit: int | None = None,
+    min_bm_volume: float | None = None,
+    category: str | None = None,
+    tier: int | None = None,
+    quality: int | None = None,
+    search: str | None = None,
+    _=Depends(require_auth),
+):
+    """Budget-aware shopping plan: which city, which items, and how many to buy
+    for the given budget to maximise expected Black Market profit."""
+    if window not in config.STAT_WINDOWS:
+        raise HTTPException(status_code=400, detail=f"unknown window '{window}'")
+    return _analytics_or_503().recommend(
+        budget=budget, city=city, window=window, min_profit=min_profit,
+        min_bm_volume=min_bm_volume, category=category, tier=tier,
+        quality=quality, search=search,
     )
 
 
