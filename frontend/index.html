@@ -27,6 +27,7 @@
 
     <nav class="tabs" id="mainTabs">
       <button class="tab active" data-view="flips">🔥 Выгодные флипы</button>
+      <button class="tab" data-view="recommend">💡 Рекомендации к покупке</button>
       <button class="tab" data-view="cities">🏙 Топ городов</button>
       <button class="tab" data-view="stats">📊 Средние цены</button>
     </nav>
@@ -48,6 +49,10 @@
         <label class="minprofit" id="minProfitWrap">
           <span>Мин. прибыль</span>
           <input type="number" id="minProfit" class="input small" value="1000" step="1000" min="0" />
+        </label>
+        <label class="minprofit" id="budgetWrap" style="display:none">
+          <span>💰 Бюджет (серебро)</span>
+          <input type="number" id="budget" class="input" style="width:150px" value="1000000" step="100000" min="0" />
         </label>
       </div>
     </section>

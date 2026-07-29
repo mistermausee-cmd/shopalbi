@@ -85,6 +85,14 @@ ROYAL_CITIES = [
 BLACK_MARKET = "Black Market"
 ALL_LOCATIONS = ROYAL_CITIES + [BLACK_MARKET]
 
+# Cities excluded as buy sources (too far / hard to reach Caerleon, e.g.
+# Brecilien). They still appear in the average-price table for reference, but
+# are not used for flips, the city ranking, or budget recommendations.
+EXCLUDED_BUY_CITIES = {
+    c.strip() for c in _get("SHOPALBI_EXCLUDED_BUY_CITIES", "Brecilien").split(",") if c.strip()
+}
+BUY_CITIES = [c for c in ROYAL_CITIES if c not in EXCLUDED_BUY_CITIES]
+
 QUALITIES = [1, 2, 3, 4, 5]
 QUALITY_NAMES = {
     1: "Обычное",
@@ -121,11 +129,22 @@ CATEGORY_NAMES = {
 
 # --- Profit math ------------------------------------------------------------
 
-# Premium sales tax when selling instantly into an existing buy order.
-# Premium = 4%, non-Premium = 8%. No setup fee applies to instant sells.
+# Black Market sale deductions.
+#  * SALES_TAX  — tax on a completed sale: 4% with Premium, 8% without.
+#  * SETUP_FEE  — order setup fee, 2.5% of the lot value, charged per listing.
+# Both are subtracted from the sale proceeds, so net = price * (1 - tax - fee).
 SALES_TAX = _get_float("SHOPALBI_SALES_TAX", 0.04)
-# Optional extra fee if you instead place your own buy/sell orders (0 for instant).
-SETUP_FEE = _get_float("SHOPALBI_SETUP_FEE", 0.0)
+SETUP_FEE = _get_float("SHOPALBI_SETUP_FEE", 0.025)
+
+# Budget recommender tuning.
+#  * SLIPPAGE — how fast your average buy price rises as you clear cheap lots
+#    (the API only exposes the single lowest price, so we model depth). At a
+#    quantity equal to one full day of Black Market volume, the average price
+#    is raised by this fraction.
+#  * VOLUME_CAPTURE — the share of a day's Black Market demand you assume you
+#    can realistically offload for one item (caps the recommended quantity).
+RECOMMEND_SLIPPAGE = _get_float("SHOPALBI_RECOMMEND_SLIPPAGE", 0.10)
+RECOMMEND_VOLUME_CAPTURE = _get_float("SHOPALBI_RECOMMEND_VOLUME_CAPTURE", 0.5)
 
 # Freshness ceilings (hours). Prices older than this are treated as untrustworthy.
 FLIP_MAX_AGE_HOURS = _get_float("SHOPALBI_FLIP_MAX_AGE_HOURS", 12.0)

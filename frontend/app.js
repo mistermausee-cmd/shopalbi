@@ -70,6 +70,7 @@ const state = {
     flips: { key: 'opportunity', dir: 'desc' },
     stats: { key: 'bm_volume', dir: 'desc' },
     cities: { key: 'score', dir: 'desc' },
+    recommend: { key: 'total_profit', dir: 'desc' },
   },
   meta: null,
   cities: [],
@@ -78,14 +79,14 @@ const state = {
 };
 
 // columns whose natural first-click direction is ascending (lower = better / text)
-const ASC_FIRST = new Set(['name', 'buy_city', 'city', 'best_item', 'buy_price', 'est', 'cheapest']);
+const ASC_FIRST = new Set(['name', 'buy_city', 'city', 'best_item', 'buy_price', 'est', 'cheapest', 'unit_price', 'avg_price']);
 
 // ---- cell renderers -------------------------------------------------------
 
 function renderNameCell(r) {
   const q = `<span class="q-badge q${r.quality}" title="${r.quality_label}"></span>`;
   return `<div class="item-name">${q}${r.name}</div>` +
-    `<div class="item-sub"><span class="pill tier">${r.tier_label}</span> ` +
+    `<div class="item-sub"><span class="pill tier">${r.tier_ench}</span> ` +
     `<span class="pill cat">${r.category_label}</span> · ${r.quality_label}</div>`;
 }
 function profitCls(v) { return v >= 0 ? 'profit-pos' : 'profit-neg'; }
@@ -164,9 +165,31 @@ function cityColumns() {
   ];
 }
 
+function recommendColumns() {
+  return [
+    { key: 'name', label: 'Предмет', left: true, value: (r) => r.name, render: renderNameCell },
+    { key: 'qty', label: 'Купить, шт', value: (r) => r.qty,
+      render: (r) => `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.qty)}</span>` },
+    { key: 'unit_price', label: 'Мин. цена', value: (r) => r.unit_price,
+      render: (r) => `<span class="num">${fmt(r.unit_price)}</span>` },
+    { key: 'avg_price', label: 'Ср. цена скупки', value: (r) => r.avg_price, hint: 'С учётом роста цены при скупке нескольких лотов',
+      render: (r) => `<span class="num">${fmt(r.avg_price)}</span>` },
+    { key: 'total_cost', label: 'Затраты', value: (r) => r.total_cost,
+      render: (r) => `<span class="num">${fmt(r.total_cost)}</span>` },
+    { key: 'total_profit', label: 'Прибыль', value: (r) => r.total_profit,
+      render: (r) => `<span class="num profit-pos">${signed(r.total_profit)}</span>` },
+    { key: 'profit_pct', label: 'Прибыль %', value: (r) => r.profit_pct,
+      render: (r) => `<span class="num ${profitCls(r.profit_pct)}">${r.profit_pct >= 0 ? '+' : ''}${r.profit_pct}%</span>` },
+    { key: 'bm_daily_volume', label: 'ЧР шт/день', value: (r) => r.bm_daily_volume,
+      render: (r) => `<span class="num cell-dim">${r.bm_daily_volume}</span>` },
+    { key: 'reliability', label: 'Надёжность', value: (r) => r.reliability, render: (r) => renderScoreCell(r.reliability) },
+  ];
+}
+
 function buildColumns() {
   if (state.view === 'flips') return flipColumns();
   if (state.view === 'cities') return cityColumns();
+  if (state.view === 'recommend') return recommendColumns();
   return statsColumns();
 }
 
@@ -205,7 +228,7 @@ function onSort(key) {
 }
 
 function sortedRows(cols) {
-  if (state.view !== 'cities') return state.rows;   // already sorted server-side
+  if (state.view !== 'cities' && state.view !== 'recommend') return state.rows;  // server-sorted
   const s = state.sort.cities;
   const col = cols.find((c) => c.key === s.key);
   const rows = state.rows.slice();
@@ -226,7 +249,9 @@ function renderRows(cols, rows) {
     e.hidden = false;
     e.textContent = state.view === 'flips'
       ? 'Флипов по текущим фильтрам нет. Снизьте мин. прибыль или дождитесь обновления данных.'
-      : (state.view === 'cities' ? 'Нет данных по городам под эти фильтры.' : 'Нет данных по этим фильтрам.');
+      : state.view === 'cities' ? 'Нет данных по городам под эти фильтры.'
+      : state.view === 'recommend' ? 'Под этот бюджет и фильтры нечего рекомендовать. Увеличьте бюджет.'
+      : 'Нет данных по этим фильтрам.';
     return;
   }
   $('#emptyState').hidden = true;
@@ -262,6 +287,15 @@ function currentFilters() {
     return p;
   }
 
+  if (state.view === 'recommend') {
+    p.set('budget', $('#budget').value || '0');
+    const bc = $('#buyCity').value;
+    if (bc) p.set('city', bc);
+    const mp = $('#minProfit').value;
+    if (mp !== '') p.set('min_profit', mp);
+    return p;
+  }
+
   p.set('limit', '300');
   const s = state.sort[state.view];
   p.set('sort', s.key);
@@ -275,7 +309,7 @@ function currentFilters() {
   return p;
 }
 
-const ENDPOINT = { flips: '/api/flips', cities: '/api/cities', stats: '/api/stats' };
+const ENDPOINT = { flips: '/api/flips', cities: '/api/cities', stats: '/api/stats', recommend: '/api/recommend' };
 
 async function load() {
   if (state.loading) return;
@@ -284,7 +318,7 @@ async function load() {
   if (showOverlay) $('#loader').hidden = false;
   try {
     const data = await fetchJSON(`${ENDPOINT[state.view]}?${currentFilters().toString()}`);
-    state.rows = data.rows || [];
+    state.rows = state.view === 'recommend' ? ((data.best && data.best.items) || []) : (data.rows || []);
     renderCurrent();
     updateMetaLine(data);
   } catch (err) {
@@ -311,6 +345,21 @@ function updateMetaLine(data) {
     $('#metaLine').innerHTML =
       `Города отсортированы по совокупной выгодности (сумма по лучшим 100 флипам города) за ${wl}. ` +
       `Начинай с верхнего — там больше всего выгодных вещей.`;
+  } else if (state.view === 'recommend') {
+    const b = data.best;
+    if (!b || !b.items_count) {
+      $('#metaLine').innerHTML =
+        `Под бюджет <b>${fmt(data.budget)}</b> выгодных закупок не найдено. Увеличь бюджет, снизь мин. прибыль или выбери другой город.`;
+    } else {
+      const cmp = data.cities.slice(0, 6)
+        .map((c) => `${cityName(c.city)}: <b>+${fmt(c.expected_profit)}</b>`).join(' · ');
+      const taxPct = ((data.sales_tax + data.setup_fee) * 100).toFixed(1);
+      $('#metaLine').innerHTML =
+        `Лучший город: <b>${cityName(data.city)}</b> · закупка на <b>${fmt(b.spent)}</b> → ожидаемая прибыль ` +
+        `<b class="profit-pos">+${fmt(b.expected_profit)}</b> (ROI ${b.roi_pct}%) · остаток <b>${fmt(b.leftover)}</b> · позиций ${b.items_count}.` +
+        `<br><span class="cell-dim">Сравнение городов: ${cmp}. Учтён налог+сбор ${taxPct}% и рост цены при скупке. ` +
+        `Остался бюджет — впиши остаток и обнови рынок, пересчитаю по актуальным ценам.</span>`;
+    }
   } else {
     $('#metaLine').innerHTML =
       `Показано предметов: <b>${data.rows.length}</b> из <b>${data.total}</b> · ` +
@@ -347,7 +396,7 @@ async function initMeta() {
     state.meta = m;
     state.cities = m.cities;
     const buyCity = $('#buyCity');
-    for (const c of m.cities) buyCity.insertAdjacentHTML('beforeend', `<option value="${c}">${cityName(c)}</option>`);
+    for (const c of (m.buy_cities || m.cities)) buyCity.insertAdjacentHTML('beforeend', `<option value="${c}">${cityName(c)}</option>`);
     const cat = $('#category');
     for (const c of m.categories) cat.insertAdjacentHTML('beforeend', `<option value="${c.id}">${c.label}</option>`);
     const tier = $('#tier');
@@ -360,9 +409,11 @@ async function initMeta() {
 }
 
 function updateControlsVisibility() {
-  // Buy-city filter and min-profit only make sense on the flip / city tabs
-  $('#buyCity').style.display = state.view === 'flips' ? '' : 'none';
-  $('#minProfitWrap').style.display = state.view === 'stats' ? 'none' : '';
+  const v = state.view;
+  // buy-city applies to flips and the recommender (there it picks / fixes the city)
+  $('#buyCity').style.display = (v === 'flips' || v === 'recommend') ? '' : 'none';
+  $('#minProfitWrap').style.display = v === 'stats' ? 'none' : '';
+  $('#budgetWrap').style.display = v === 'recommend' ? '' : 'none';
 }
 
 function wireEvents() {
@@ -394,6 +445,7 @@ function wireEvents() {
   $('#tier').addEventListener('change', load);
   $('#quality').addEventListener('change', load);
   $('#minProfit').addEventListener('input', debounce(load, 500));
+  $('#budget').addEventListener('input', debounce(load, 500));
 
   $('#refreshBtn').addEventListener('click', async () => {
     const btn = $('#refreshBtn');
