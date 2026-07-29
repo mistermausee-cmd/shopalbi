@@ -145,6 +145,41 @@ SETUP_FEE = _get_float("SHOPALBI_SETUP_FEE", 0.025)
 #    can realistically offload for one item (caps the recommended quantity).
 RECOMMEND_SLIPPAGE = _get_float("SHOPALBI_RECOMMEND_SLIPPAGE", 0.10)
 RECOMMEND_VOLUME_CAPTURE = _get_float("SHOPALBI_RECOMMEND_VOLUME_CAPTURE", 0.5)
+# Hard cap on recommended quantity per item when we have NO live order-book
+# depth (warmup / thin feed). Prevents suggesting quantities that can't exist.
+RECOMMEND_NODEPTH_CAP = _get_int("SHOPALBI_RECOMMEND_NODEPTH_CAP", 10)
+
+
+# --- Live order-book feed (AODP public NATS) --------------------------------
+# Subscribing needs no game client — it's a plain TCP stream anyone can consume.
+# Each message is one market order carrying price + Amount + side, i.e. real
+# order-book depth. Regions: :4222 Americas, :24222 Asia, :34222 Europe.
+NATS_ENABLE = _get("SHOPALBI_NATS_ENABLE", "true").lower() in ("1", "true", "yes")
+NATS_URL = _get(
+    "SHOPALBI_NATS_URL",
+    "nats://public:thenewalbiondata@nats.albion-online-data.com:34222",
+)
+NATS_TOPIC = _get("SHOPALBI_NATS_TOPIC", "marketorders.deduped")
+
+# Live orders older than this (by last-seen or past their Expires) are dropped.
+ORDER_MAX_AGE_MINUTES = _get_int("SHOPALBI_ORDER_MAX_AGE_MINUTES", 30)
+# Batch flushing of incoming orders to SQLite.
+ORDER_FLUSH_SECONDS = _get_float("SHOPALBI_ORDER_FLUSH_SECONDS", 3.0)
+ORDER_FLUSH_MAX = _get_int("SHOPALBI_ORDER_FLUSH_MAX", 400)
+
+# AODP numeric LocationId -> our city name. Verified against the REST API and
+# the live feed: 3003 is Caerleon's normal market (offer-heavy), 3005 is the
+# Black Market (NPC buy orders).
+NATS_LOCATION_IDS = {
+    7: "Thetford",
+    1002: "Lymhurst",
+    2004: "Bridgewatch",
+    3003: "Caerleon",
+    3005: BLACK_MARKET,
+    3008: "Martlock",
+    4002: "Fort Sterling",
+    5003: "Brecilien",
+}
 
 # Freshness ceilings (hours). Prices older than this are treated as untrustworthy.
 FLIP_MAX_AGE_HOURS = _get_float("SHOPALBI_FLIP_MAX_AGE_HOURS", 12.0)

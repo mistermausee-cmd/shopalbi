@@ -169,11 +169,21 @@ function recommendColumns() {
   return [
     { key: 'name', label: 'Предмет', left: true, value: (r) => r.name, render: renderNameCell },
     { key: 'qty', label: 'Купить, шт', value: (r) => r.qty,
-      render: (r) => `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.qty)}</span>` },
+      render: (r) => {
+        const tag = r.source === 'live'
+          ? '<span class="src src-live" title="Реальная глубина стакана">live</span>'
+          : '<span class="src src-est" title="Оценка — живого стакана пока нет">оценка</span>';
+        return `<span class="num" style="color:var(--gold);font-weight:700">${fmt(r.qty)}</span> ${tag}`;
+      } },
+    { key: 'available', label: 'Есть на рынке', value: (r) => (r.available == null ? -1 : r.available),
+      hint: 'Сколько всего выгодно купить по реальным ордерам',
+      render: (r) => r.available == null ? '<span class="cell-dim">—</span>' : `<span class="num cell-dim">${fmt(r.available)}</span>` },
     { key: 'unit_price', label: 'Мин. цена', value: (r) => r.unit_price,
       render: (r) => `<span class="num">${fmt(r.unit_price)}</span>` },
-    { key: 'avg_price', label: 'Ср. цена скупки', value: (r) => r.avg_price, hint: 'С учётом роста цены при скупке нескольких лотов',
+    { key: 'avg_price', label: 'Ср. цена скупки', value: (r) => r.avg_price, hint: 'Средняя цена с учётом скупки нескольких лотов по возрастающей',
       render: (r) => `<span class="num">${fmt(r.avg_price)}</span>` },
+    { key: 'bm_buy_now', label: 'Выкуп ЧР сейчас', value: (r) => r.bm_buy_now, hint: 'Текущая цена выкупа на Чёрном рынке',
+      render: (r) => `<span class="num" style="color:var(--gold)">${fmt(r.bm_buy_now)}</span>` },
     { key: 'total_cost', label: 'Затраты', value: (r) => r.total_cost,
       render: (r) => `<span class="num">${fmt(r.total_cost)}</span>` },
     { key: 'total_profit', label: 'Прибыль', value: (r) => r.total_profit,
@@ -354,11 +364,14 @@ function updateMetaLine(data) {
       const cmp = data.cities.slice(0, 6)
         .map((c) => `${cityName(c.city)}: <b>+${fmt(c.expected_profit)}</b>`).join(' · ');
       const taxPct = ((data.sales_tax + data.setup_fee) * 100).toFixed(1);
+      const mode = b.source === 'live'
+        ? `по <b>реальной глубине стакана</b> (в стакане ${fmt(data.orderbook_orders)} живых ордеров)`
+        : `<b>оценка</b> — живой стакан ещё набирается (${fmt(data.orderbook_orders)} ордеров), количества ограничены сверху`;
       $('#metaLine').innerHTML =
         `Лучший город: <b>${cityName(data.city)}</b> · закупка на <b>${fmt(b.spent)}</b> → ожидаемая прибыль ` +
         `<b class="profit-pos">+${fmt(b.expected_profit)}</b> (ROI ${b.roi_pct}%) · остаток <b>${fmt(b.leftover)}</b> · позиций ${b.items_count}.` +
-        `<br><span class="cell-dim">Сравнение городов: ${cmp}. Учтён налог+сбор ${taxPct}% и рост цены при скупке. ` +
-        `Остался бюджет — впиши остаток и обнови рынок, пересчитаю по актуальным ценам.</span>`;
+        `<br><span class="cell-dim">Расчёт ${mode}. Сравнение городов: ${cmp}. Налог+сбор ${taxPct}%. ` +
+        `Остался бюджет — впиши остаток и обнови, пересчитаю по актуальным ордерам.</span>`;
     }
   } else {
     $('#metaLine').innerHTML =
@@ -378,8 +391,9 @@ async function pollStatus() {
       $('#statusText').textContent = `Каталог: ${fmt(s.items)} предметов · сбор данных…`;
     } else {
       dot.className = 'dot ok';
+      const book = s.orderbook_orders ? ` · стакан ${fmt(s.orderbook_orders)} ордеров` : '';
       $('#statusText').textContent =
-        `Цены: ${timeAgo(s.current_refreshed_at)} · история: ${timeAgo(s.history_refreshed_at)} · ${fmt(s.items)} предметов`;
+        `Цены: ${timeAgo(s.current_refreshed_at)} · история: ${timeAgo(s.history_refreshed_at)} · ${fmt(s.items)} предметов${book}`;
     }
     $('#taxNote').textContent = `Налог продажи ЧР (премиум): ${(s.sales_tax * 100).toFixed(0)}%`;
   } catch {
