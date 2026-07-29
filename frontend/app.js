@@ -34,6 +34,13 @@ const CITY_RU = {
   'Brecilien': 'Бресилиан', 'Black Market': 'Чёрный рынок',
 };
 const cityRu = (c) => CITY_RU[c] || c || '—';
+
+// Quality names, filled from /api/meta so the backend stays the single source
+// of truth. Fallback matches the in-game RU client wording.
+const QUALITY_RU = {
+  1: 'Обычное', 2: 'Хорошее', 3: 'Незаурядное', 4: 'Отличное', 5: 'Шедевральное',
+};
+const qualityRu = (q) => QUALITY_RU[q] || ('q' + q);
 const WIN_RU = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц', quarter: '90 дней' };
 
 function timeAgo(iso) {
@@ -113,7 +120,8 @@ function nameCell(r) {
   const pills = [`<span class="pill tier">${esc(r.tier_ench)}</span>`];
   if (r.category_label) pills.push(`<span class="pill cat">${esc(r.category_label)}</span>`);
   if (r.quality_upsell) {
-    pills.push(`<span class="pill up" title="Чёрный рынок платит больше за ордер более низкого качества (q${r.bm_quality}), а он принимает предметы своего качества и выше. Продавать нужно в закладке q${r.bm_quality}.">→ q${r.bm_quality}</span>`);
+    const target = qualityRu(r.bm_quality);
+    pills.push(`<span class="pill up" title="Покупаешь «${esc(qualityRu(r.quality))}», а продавать надо в ордер «${esc(target)}» — он платит больше. Ордер выкупа принимает предметы своего качества И ВЫШЕ, а Чёрный рынок оценивает каждое качество отдельно, поэтому за низкое нередко даёт больше. В игре открой вкладку поиска и выбери качество «${esc(target)}».">→ продать как «${esc(target)}»</span>`);
   }
   if (r.spike) {
     pills.push('<span class="pill spike" title="Текущая ставка ЧР сильно выше средней за период — вероятен разовый скачок, который исчезнет, пока ты едешь.">скачок</span>');
@@ -122,9 +130,10 @@ function nameCell(r) {
   if (r.source === 'est') pills.push('<span class="pill est" title="Живой глубины по этому предмету нет — количество ограничено сверху">оценка</span>');
   let qtxt = esc(r.quality_label);
   if (r.also_qualities && r.also_qualities.length) {
-    qtxt += ` <span class="dimc" title="По этой же цене доступно и это качество — сделка та же.">(также q${r.also_qualities.join(', q')})</span>`;
+    const also = r.also_qualities.map(qualityRu).join(', ');
+    qtxt += ` <span class="dimc" title="По этой же цене на рынке доступно и это качество — сделка получается та же.">(также ${esc(also)})</span>`;
   }
-  return `<div class="item-name" title="${esc(r.item_id)}"><span class="q q${r.quality}" title="${esc(r.quality_label)}"></span>${esc(r.name)}</div>`
+  return `<div class="item-name" title="${esc(r.item_id)}"><span class="q q${r.quality}" title="Качество: ${esc(r.quality_label)}"></span>${esc(r.name)}</div>`
        + `<div class="item-sub">${pills.join('')} <span>${qtxt}</span></div>`;
 }
 const money = (v, cls) => `<span class="num ${cls || ''}">${fmt(v)}</span>`;
@@ -139,6 +148,10 @@ function scoreCell(v) {
 // ---------------------------------------------------------------- columns
 
 const H = {
+  item: 'Цветная точка — качество предмета: Обычное, Хорошее, Незаурядное, Отличное, Шедевральное. '
+      + 'Бейдж «Т6.2» — тир и уровень зачарования (T6, зачарование 2). '
+      + 'Значок «→ продать как» означает, что Чёрный рынок платит больше за ордер более низкого '
+      + 'качества, а такой ордер принимает твоё качество и выше — продавать нужно именно в него.',
   opportunity: 'Итоговая оценка = ожидаемая прибыль с единицы после риска ганка × надёжность/100. Именно по ней сортируется список по умолчанию.',
   throughput: 'Оценка × сколько штук в день реально съедает Чёрный рынок. Показывает, что стоит возить потоком, а не разово.',
   profit: 'Чистая прибыль с 1 шт: ставка ЧР × 0.96 − цена покупки. 0.96 = минус налог 4% с Premium. Сбора за размещение нет: и покупка из ордера продажи, и мгновенная продажа в ордер выкупа его не платят.',
@@ -156,8 +169,8 @@ const H = {
 
 function colsFlips() {
   return [
-    { key: 'name', label: 'Предмет', left: true, stick: true, render: nameCell,
-      csv: (r) => `${r.name} ${r.tier_ench} q${r.quality}` },
+    { key: 'name', label: 'Предмет', left: true, stick: true, hint: H.item, render: nameCell,
+      csv: (r) => `${r.name} ${r.tier_ench} ${qualityRu(r.quality)}` },
     { key: 'opportunity', label: 'Оценка', hint: H.opportunity,
       render: (r) => `<span class="num big" style="color:var(--gold)">${fmt(r.opportunity)}</span>`,
       csv: (r) => r.opportunity },
@@ -200,7 +213,7 @@ function colsFlips() {
 function colsPlan() {
   return [
     { key: 'name', label: 'Предмет', left: true, stick: true, value: (r) => r.name, render: nameCell,
-      csv: (r) => `${r.name} ${r.tier_ench} q${r.quality}` },
+      csv: (r) => `${r.name} ${r.tier_ench} ${qualityRu(r.quality)}` },
     { key: 'qty', label: 'Купить, шт', value: (r) => r.qty,
       hint: 'Сколько штук брать. При наличии живого стакана количество ограничено реальными ордерами: и предложением города, и спросом ЧР.',
       render: (r) => `<span class="num big" style="color:var(--gold)">${fmt(r.qty)}</span>`
@@ -215,7 +228,9 @@ function colsPlan() {
       render: (r) => money(r.avg_price, 'big'), csv: (r) => r.avg_price },
     { key: 'bm_buy_now', label: 'Ставка ЧР', value: (r) => r.bm_buy_now, hint: H.bmPrice,
       render: (r) => `<span class="num" style="color:var(--gold)">${fmt(r.bm_buy_now)}</span>`
-        + (r.quality_upsell ? `<span class="sub2">в ордер q${r.bm_quality}</span>` : ''),
+        + (r.quality_upsell
+            ? `<span class="sub2" title="Ордер выкупа принимает своё качество и выше, и платит больше именно за это.">в ордер «${esc(qualityRu(r.bm_quality))}»</span>`
+            : ''),
       csv: (r) => r.bm_buy_now },
     { key: 'total_cost', label: 'Затраты', value: (r) => r.total_cost,
       render: (r) => money(r.total_cost), csv: (r) => r.total_cost },
@@ -271,7 +286,7 @@ function colsCities() {
 function colsStats() {
   const cols = [
     { key: 'name', label: 'Предмет', left: true, stick: true, render: nameCell,
-      csv: (r) => `${r.name} ${r.tier_ench} q${r.quality}` },
+      csv: (r) => `${r.name} ${r.tier_ench} ${qualityRu(r.quality)}` },
     { key: 'bm_avg', label: 'ЧР средняя', hint: H.vwap,
       render: (r) => money(r.bm_avg, 'big'), csv: (r) => r.bm_avg },
     { key: 'bm_now', label: 'ЧР сейчас', hint: 'Текущая ставка выкупа ЧР для этого качества.',
@@ -588,7 +603,10 @@ async function initMeta() {
   for (const c of m.categories) opt($('#category'), c.id, c.label);
   for (const t of m.tiers) opt($('#tier'), t, 'T' + t);
   for (const e of m.enchants) opt($('#enchant'), e, e === 0 ? 'Без зач. (.0)' : '.' + e);
-  for (const q of m.qualities) opt($('#quality'), q.id, q.label);
+  for (const q of m.qualities) {
+    opt($('#quality'), q.id, q.label);
+    QUALITY_RU[q.id] = q.label;          // backend is the source of truth
+  }
 
   // Window buttons come from the server so a new window needs no HTML edit.
   if (!m.windows.some((w) => w.id === state.window)) state.window = m.windows[0].id;
