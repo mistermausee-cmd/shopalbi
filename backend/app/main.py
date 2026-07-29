@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import secrets
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -25,10 +26,29 @@ from .engine import Analytics
 from .scheduler import RefreshManager
 from .storage import Storage
 
+# Log to stdout (docker logs) AND to a rotating file on the data volume, so
+# errors can be inspected even without `docker compose logs`.
+_handlers: list[logging.Handler] = [logging.StreamHandler()]
+try:
+    _log_path = config.DATA_DIR / "shopalbi.log"
+    _handlers.append(
+        RotatingFileHandler(_log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+    )
+except OSError:
+    pass  # if the volume isn't writable, keep stdout logging only
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=_handlers,
 )
+# Route uvicorn's own loggers through the same handlers so access/error logs
+# also land in the file.
+for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+    _ul = logging.getLogger(_name)
+    _ul.handlers = _handlers
+    _ul.propagate = False
+
 log = logging.getLogger("shopalbi")
 
 # shared singletons, wired up in the lifespan handler

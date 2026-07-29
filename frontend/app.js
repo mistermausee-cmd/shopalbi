@@ -55,6 +55,19 @@ function debounce(fn, ms) {
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
+// fetch JSON with a hard timeout so a stalled request can never hang the UI
+async function fetchJSON(url, timeoutMs = 25000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ---- state ----------------------------------------------------------------
 
 const state = {
@@ -205,24 +218,27 @@ function currentFilters() {
 async function load() {
   if (state.loading) return;
   state.loading = true;
-  $('#loader').hidden = false;
+  // Only show the blocking overlay on the first load / when the table is empty,
+  // so re-filtering doesn't flash a spinner over data that's already there.
+  const showOverlay = !$('#tbody').children.length;
+  if (showOverlay) $('#loader').hidden = false;
   const endpoint = state.view === 'flips' ? '/api/flips' : '/api/stats';
   try {
-    const res = await fetch(`${endpoint}?${currentFilters().toString()}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await fetchJSON(`${endpoint}?${currentFilters().toString()}`);
     const cols = buildColumns();
     renderHead(cols);
     renderRows(cols, data.rows || []);
     updateMetaLine(data);
   } catch (err) {
-    toast('Ошибка загрузки: ' + err.message, 'err');
-    $('#emptyState').hidden = false;
-    $('#emptyState').textContent = 'Не удалось загрузить данные.';
-    $('#tbody').innerHTML = '';
+    const msg = err.name === 'AbortError' ? 'сервер не ответил вовремя' : err.message;
+    toast('Ошибка загрузки: ' + msg, 'err');
+    if (!$('#tbody').children.length) {
+      $('#emptyState').hidden = false;
+      $('#emptyState').textContent = 'Не удалось загрузить данные.';
+    }
   } finally {
     state.loading = false;
-    $('#loader').hidden = true;
+    $('#loader').hidden = true;   // always clear the overlay
   }
 }
 

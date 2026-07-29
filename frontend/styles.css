@@ -21,6 +21,11 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* The [hidden] attribute must win over class rules that set display
+   (e.g. .loader/.empty use display:flex). Without this the loader overlay
+   never disappears and spins forever on top of already-loaded data. */
+[hidden] { display: none !important; }
+
 body {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background:
