@@ -459,6 +459,7 @@ class Analytics:
                 "bm_ask": r["bm_ask"],
                 "bm_daily_volume": round(bm_daily, 1),
                 "bm_days": r["bm_days"],
+                "city_vwap": r["city_vwap"],
                 "bm_trend_pct": round(trend, 1),
                 "profit": round(profit),
                 "profit_pct": round(roi * 100.0, 1),
@@ -888,16 +889,36 @@ class Analytics:
             # only carries markets players actually opened, so a thin book is
             # missing data, not evidence that the flip is bad.)
             for meta in group:
+                # How many units the Black Market plausibly absorbs. This is the
+                # bound that should bite; the constant is only a backstop.
                 cap = config.RECOMMEND_NODEPTH_CAP
                 if meta["bm_daily_volume"] > 0:
                     cap = min(cap, max(1, int(meta["bm_daily_volume"] * config.RECOMMEND_VOLUME_CAPTURE)))
+
+                # First few units can realistically be had at the cheapest listed
+                # price. Beyond that we are clearing several lots, and the city's
+                # own volume-weighted average is the honest expected fill price —
+                # otherwise a big quantity silently assumes the whole book sits at
+                # the single best offer.
+                trust_qty = min(cap, config.RECOMMEND_TRUST_MIN_PRICE_QTY)
+                cheap_cost = float(meta["buy_cost"])
+                bulk_price = max(float(meta["buy_price"]), float(meta.get("city_vwap") or 0))
+                bulk_cost = bulk_price * cost_mult
+                rev = float(meta["bm_price"]) * net
+
                 lots.append({
-                    "item_id": item_id, "meta": meta, "qty": cap,
-                    "unit_cost": float(meta["buy_cost"]),
-                    "unit_rev": float(meta["bm_price"]) * net,
+                    "item_id": item_id, "meta": meta, "qty": trust_qty,
+                    "unit_cost": cheap_cost, "unit_rev": rev,
                     "buy_price": meta["buy_price"], "bm_price": meta["bm_price"],
                     "bm_quality": meta["bm_quality"], "source": "est",
                 })
+                if cap > trust_qty and bulk_cost > 0:
+                    lots.append({
+                        "item_id": item_id, "meta": meta, "qty": cap - trust_qty,
+                        "unit_cost": bulk_cost, "unit_rev": rev,
+                        "buy_price": round(bulk_price), "bm_price": meta["bm_price"],
+                        "bm_quality": meta["bm_quality"], "source": "est",
+                    })
 
         # ---- 2. greedy budget fill ----------------------------------------
         # Rank by risk-adjusted return per silver spent, weighted by how much we
@@ -1003,6 +1024,23 @@ class Analytics:
         spent = sum(x["total_cost"] for x in items)
         profit = sum(x["total_profit"] for x in items)
         ev = sum(x["ev_profit"] for x in items)
+
+        # Why the budget was not fully placed. Without this the user just sees a
+        # large leftover and cannot tell a deliberate limit from a bug.
+        leftover = budget - spent
+        depth_left = sum(lot_left)
+        if not lots:
+            reason = "filters"
+        elif leftover <= 0 or (budget and leftover / budget < 0.02):
+            reason = "budget"
+        elif depth_left <= 0:
+            reason = "depth"
+        elif len(picked) >= config.RECOMMEND_MAX_ITEMS:
+            reason = "positions"
+        elif not any(l["unit_cost"] <= leftover for i, l in enumerate(lots) if lot_left[i] > 0):
+            reason = "budget"
+        else:
+            reason = "depth"
         absorb = max((x["absorb_h"] or 0) for x in items) if items else 0
         # Wall clock for one run = shopping + ride. Absorption is reported
         # separately because you are not standing still while the BM eats the
@@ -1017,7 +1055,10 @@ class Analytics:
             "items": items,
             "items_count": len(items),
             "spent": round(spent),
-            "leftover": round(budget - spent),
+            "leftover": round(leftover),
+            "limit_reason": reason,
+            "candidates": len(cands),
+            "max_items": config.RECOMMEND_MAX_ITEMS,
             "profit": round(profit),
             "ev_profit": round(ev),
             "roi_pct": round(profit / spent * 100.0, 1) if spent else 0.0,

@@ -109,10 +109,12 @@ EXCLUDED_BUY_CITIES = {
 BUY_CITIES = [c for c in ROYAL_CITIES if c not in EXCLUDED_BUY_CITIES]
 
 QUALITIES = [1, 2, 3, 4, 5]
+# Wording matches the Russian game client, so the label can be read straight
+# off the screen and found in the in-game quality tabs.
 QUALITY_NAMES = {
     1: "Обычное",
     2: "Хорошее",
-    3: "Незаурядное",
+    3: "Выдающееся",
     4: "Отличное",
     5: "Шедевральное",
 }
@@ -259,14 +261,26 @@ DEFAULT_MIN_BM_DAILY_VOLUME = _get_float("SHOPALBI_MIN_BM_DAILY_VOLUME", 1.0)
 
 # --- Budget recommender -----------------------------------------------------
 
-# Max qty per item when we have NO live order-book depth for it (warmup or a
-# gap in the feed). Prevents "buy 300x T4" suggestions that cannot be filled.
-RECOMMEND_NODEPTH_CAP = _get_int("SHOPALBI_RECOMMEND_NODEPTH_CAP", 8)
-# Also cap no-depth quantities by a share of one day's BM absorption.
+# Quantities when we have NO live order-book depth for an item (feed warmup or
+# a market nobody has opened in game recently).
+#
+# The real bound is what the Black Market absorbs per day: suggesting more than
+# a fraction of that is fiction no matter how much silver you hold. The absolute
+# ceiling is only a backstop for absurd cases.
+#
+# It used to be 8, which *overrode* the volume figure — a T5 bag clearing ~4,300
+# units/day still got capped at 8, so a 10M budget could only ever place ~2M.
+# The volume-derived bound has to be the thing that binds, not the backstop.
+RECOMMEND_NODEPTH_CAP = _get_int("SHOPALBI_RECOMMEND_NODEPTH_CAP", 60)
 RECOMMEND_VOLUME_CAPTURE = _get_float("SHOPALBI_RECOMMEND_VOLUME_CAPTURE", 0.15)
+# Without live depth we know the price of the cheapest lot but not its size, so
+# buying N units at that exact price is optimistic. For quantities above this,
+# the expected fill price falls back to the city's own volume-weighted average,
+# which is what you actually end up paying when you clear several lots.
+RECOMMEND_TRUST_MIN_PRICE_QTY = _get_int("SHOPALBI_RECOMMEND_TRUST_MIN_PRICE_QTY", 3)
 # Don't sink the whole budget into one item.
 RECOMMEND_MAX_ITEM_SHARE = _get_float("SHOPALBI_RECOMMEND_MAX_ITEM_SHARE", 0.30)
-RECOMMEND_MAX_ITEMS = _get_int("SHOPALBI_RECOMMEND_MAX_ITEMS", 40)
+RECOMMEND_MAX_ITEMS = _get_int("SHOPALBI_RECOMMEND_MAX_ITEMS", 60)
 
 
 # --- Live order-book feed (AODP public NATS) --------------------------------
