@@ -61,6 +61,20 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS order_book (
+    order_id INTEGER PRIMARY KEY,
+    item_id  TEXT NOT NULL,
+    city     TEXT NOT NULL,
+    quality  INTEGER NOT NULL,
+    side     TEXT NOT NULL,          -- 'offer' (sell) | 'request' (buy)
+    price    INTEGER NOT NULL,
+    amount   INTEGER NOT NULL,
+    expires  TEXT,
+    seen_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ob_offer ON order_book(city, side, item_id, quality);
+CREATE INDEX IF NOT EXISTS idx_ob_seen ON order_book(seen_at);
 """
 
 
@@ -227,3 +241,49 @@ class Storage:
             cur.execute("SELECT value FROM meta WHERE key=?", (key,))
             row = cur.fetchone()
             return row["value"] if row else default
+
+    # -- live order book (from the NATS feed) -------------------------------
+
+    def upsert_orders(self, rows: list[tuple]) -> int:
+        """rows: (order_id, item_id, city, quality, side, price, amount, expires, seen_at)."""
+        if not rows:
+            return 0
+        with self.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO order_book
+                   (order_id, item_id, city, quality, side, price, amount, expires, seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(order_id) DO UPDATE SET
+                     price=excluded.price, amount=excluded.amount,
+                     expires=excluded.expires, seen_at=excluded.seen_at""",
+                rows,
+            )
+        return len(rows)
+
+    def prune_orders(self, min_seen_iso: str, now_iso: str) -> int:
+        with self.cursor() as cur:
+            cur.execute(
+                "DELETE FROM order_book WHERE seen_at < ? OR (expires IS NOT NULL AND expires <> '' AND expires < ?) OR amount <= 0",
+                (min_seen_iso, now_iso),
+            )
+            return cur.rowcount
+
+    def live_book(self, side: str, min_seen_iso: str, now_iso: str, city: str | None = None) -> list[dict]:
+        """Fresh, unexpired orders of a side. Optionally restricted to one city."""
+        q = (
+            "SELECT item_id, city, quality, price, amount FROM order_book "
+            "WHERE side=? AND amount>0 AND seen_at>=? "
+            "AND (expires IS NULL OR expires='' OR expires>=?)"
+        )
+        params: list = [side, min_seen_iso, now_iso]
+        if city is not None:
+            q += " AND city=?"
+            params.append(city)
+        with self.cursor() as cur:
+            cur.execute(q, params)
+            return [dict(r) for r in cur.fetchall()]
+
+    def order_book_count(self, min_seen_iso: str) -> int:
+        with self.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM order_book WHERE seen_at>=?", (min_seen_iso,))
+            return cur.fetchone()["n"]

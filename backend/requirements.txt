@@ -2,3 +2,4 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 requests==2.32.3
 APScheduler==3.11.0
+nats-py==2.9.0

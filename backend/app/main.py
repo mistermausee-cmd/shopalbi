@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config, engine
 from .aodp_client import AodpClient
 from .engine import Analytics
+from .nats_consumer import NatsConsumer
 from .scheduler import RefreshManager
 from .storage import Storage
 
@@ -55,11 +56,12 @@ log = logging.getLogger("shopalbi")
 _storage: Storage | None = None
 _analytics: Analytics | None = None
 _manager: RefreshManager | None = None
+_nats: NatsConsumer | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _storage, _analytics, _manager
+    global _storage, _analytics, _manager, _nats
     _storage = Storage()
     client = AodpClient()
     _analytics = Analytics(_storage)
@@ -69,9 +71,14 @@ async def lifespan(app: FastAPI):
     if config.REFRESH_ON_START:
         log.info("kicking off initial data refresh")
         _manager.refresh_all_async()
+    if config.NATS_ENABLE:
+        _nats = NatsConsumer(_storage)
+        _nats.start()
     try:
         yield
     finally:
+        if _nats:
+            _nats.stop()
         if _manager:
             _manager.shutdown()
 

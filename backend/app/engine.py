@@ -198,6 +198,7 @@ class Analytics:
 
     def status(self) -> dict:
         s = self.storage
+        min_seen, _ = self._book_window()
         return {
             "items": s.item_count(),
             "catalog_refreshed_at": s.get_meta("catalog_refreshed_at"),
@@ -205,8 +206,12 @@ class Analytics:
             "current_rows": int(s.get_meta("current_rows", "0")),
             "history_refreshed_at": s.get_meta("history_refreshed_at"),
             "history_rows": int(s.get_meta("history_rows", "0")),
+            "orderbook_orders": s.order_book_count(min_seen),
+            "orderbook_updated_at": s.get_meta("orderbook_updated_at"),
+            "orderbook_received": int(s.get_meta("orderbook_received", "0")),
             "server": config.API_HOST,
             "sales_tax": config.SALES_TAX,
+            "setup_fee": config.SETUP_FEE,
             "windows": config.STAT_WINDOWS,
         }
 
@@ -552,36 +557,33 @@ class Analytics:
         tier: int | None = None,
         quality: int | None = None,
         search: str | None = None,
-        slippage: float | None = None,
-        capture: float | None = None,
     ) -> dict:
-        """Given a budget, decide which city to shop in and exactly what to buy
-        (item + quantity) to maximise expected profit, then re-sell on the Black
-        Market. Quantities are bounded by the Black Market's daily throughput and
-        an average buy price that rises with quantity (slippage), because the API
-        exposes only the single lowest sell price, not full order-book depth."""
+        """Budget shopping plan built on LIVE order-book depth from the NATS feed.
+        Real sell offers (cheapest first) are matched against the Black Market's
+        real buy orders (highest first), bounded by the actual amounts on both
+        sides and the budget — so recommended quantities can never exceed what
+        physically exists. If a city has no live depth yet, we fall back to a
+        hard-capped estimate from the REST snapshot."""
         min_profit = config.DEFAULT_MIN_PROFIT if min_profit is None else min_profit
         min_bm_volume = (
             config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
         )
-        slippage = config.RECOMMEND_SLIPPAGE if slippage is None else slippage
-        capture = config.RECOMMEND_VOLUME_CAPTURE if capture is None else capture
         budget = max(0, int(budget or 0))
+        window_days = config.STAT_WINDOWS.get(window, 7)
+        agg = self._aggregate(window_days)
+        meta = self.storage.item_meta_map()
 
-        cands = self._flip_candidates(
-            window, min_profit, min_bm_volume, category, tier, quality, search
-        )
-        from collections import defaultdict
+        bm_req = self._book_grouped("request", config.BLACK_MARKET)
+        min_seen, _now = self._book_window()
+        book_orders = self.storage.order_book_count(min_seen)
 
-        by_city: dict[str, list[dict]] = defaultdict(list)
-        for c in cands:
-            by_city[c["buy_city"]].append(c)
-
-        cities = [city] if city else list(by_city.keys())
-        plans = [
-            {**self._allocate_budget(by_city.get(cy, []), budget, slippage, capture), "city": cy}
-            for cy in cities
-        ]
+        cities = [city] if city else list(config.BUY_CITIES)
+        plans = []
+        for cy in cities:
+            plan = self._plan_city(cy, budget, window, meta, agg, bm_req,
+                                   min_profit, min_bm_volume, category, tier, quality, search)
+            plan["city"] = cy
+            plans.append(plan)
         plans.sort(key=lambda p: p["expected_profit"], reverse=True)
         best = plans[0] if plans else None
         return {
@@ -590,79 +592,192 @@ class Analytics:
             "sales_tax": config.SALES_TAX,
             "setup_fee": config.SETUP_FEE,
             "requested_city": city,
+            "orderbook_orders": book_orders,
+            "has_depth": bool(bm_req),
             "city": best["city"] if best else None,
             "best": best,
             "cities": [
-                {k: p[k] for k in ("city", "expected_profit", "spent", "leftover", "roi_pct", "items_count")}
+                {k: p.get(k) for k in
+                 ("city", "expected_profit", "spent", "leftover", "roi_pct", "items_count", "source")}
                 for p in plans
             ],
         }
 
-    @staticmethod
-    def _allocate_budget(candidates: list[dict], budget: int, slippage: float, capture: float) -> dict:
-        # Spend on the most silver-efficient flips first (profit per silver),
-        # capped per item by how much the Black Market can realistically absorb.
-        ranked = sorted(
-            candidates,
-            key=lambda c: (c["profit"] / c["buy_price"] if c["buy_price"] else 0.0, c["reliability"]),
-            reverse=True,
-        )
-        net = 1.0 - config.SALES_TAX - config.SETUP_FEE
-        remaining = float(budget)
-        items: list[dict] = []
-        spent = 0.0
-        profit_total = 0.0
+    def _book_window(self) -> tuple[str, str]:
+        now = datetime.now(timezone.utc)
+        return (now - timedelta(minutes=config.ORDER_MAX_AGE_MINUTES)).isoformat(), now.isoformat()
 
-        for c in ranked:
+    def _book_grouped(self, side: str, city: str | None = None) -> dict:
+        min_seen, now = self._book_window()
+        rows = self.storage.live_book(side, min_seen, now, city)
+        g: dict[tuple, list[list[int]]] = {}
+        for r in rows:
+            g.setdefault((r["item_id"], r["quality"]), []).append([r["price"], r["amount"]])
+        return g
+
+    def _plan_city(self, city, budget, window, meta, agg, bm_req,
+                   min_profit, min_bm_volume, category, tier, quality, search) -> dict:
+        offers = self._book_grouped("offer", city)
+        net = 1.0 - config.SALES_TAX - config.SETUP_FEE
+        search_l = (search or "").strip().lower()
+
+        # depth path: live sell offers here AND live Black Market buy orders
+        if offers and bm_req:
+            fills: list[dict] = []
+            for key, off_list in offers.items():
+                if key not in bm_req:
+                    continue
+                item_id, q = key
+                m = meta.get(item_id)
+                if not m:
+                    continue
+                if category and m["category"] != category:
+                    continue
+                if tier and m["tier"] != tier:
+                    continue
+                if quality and q != quality:
+                    continue
+                bm_hist = agg.get((item_id, config.BLACK_MARKET, q))
+                bm_daily = bm_hist["daily"] if bm_hist else 0.0
+                if bm_daily < min_bm_volume:
+                    continue
+                display = _clean_name(m["name_ru"] or m["name_en"])
+                if search_l and search_l not in display.lower() and search_l not in item_id.lower():
+                    continue
+                # fresh copies so we never mutate the shared bm_req lists
+                offs = sorted(([p, a] for p, a in off_list), key=lambda x: x[0])
+                reqs = sorted(([p, a] for p, a in bm_req[key]), key=lambda x: x[0], reverse=True)
+                i = j = 0
+                while i < len(offs) and j < len(reqs):
+                    buy_p, sell_p = offs[i][0], reqs[j][0]
+                    margin = sell_p * net - buy_p
+                    if margin <= 0:
+                        break  # cheapest remaining offer no longer beats best BM buy
+                    lot = min(offs[i][1], reqs[j][1])
+                    if lot > 0:
+                        fills.append({
+                            "key": key, "item_id": item_id, "q": q, "m": m, "name": display,
+                            "buy_price": buy_p, "sell_price": sell_p, "qty": lot,
+                            "unit_profit": margin, "bm_daily": bm_daily,
+                        })
+                        offs[i][1] -= lot
+                        reqs[j][1] -= lot
+                    if offs[i][1] <= 0:
+                        i += 1
+                    if j < len(reqs) and reqs[j][1] <= 0:
+                        j += 1
+            if fills:
+                return self._greedy_fill(fills, budget, agg, net)
+
+        # no live depth here -> hard-capped estimate from the REST snapshot
+        return self._estimate_plan(city, budget, window, min_profit, min_bm_volume,
+                                   category, tier, quality, search, net)
+
+    def _greedy_fill(self, fills, budget, agg, net) -> dict:
+        # total profitably-buyable amount per item (full depth, ignoring budget)
+        avail: dict[tuple, int] = {}
+        for f in fills:
+            avail[f["key"]] = avail.get(f["key"], 0) + f["qty"]
+        # spend budget on the most silver-efficient lots first
+        fills.sort(key=lambda f: f["unit_profit"] / f["buy_price"] if f["buy_price"] else 0.0, reverse=True)
+        remaining = float(budget)
+        aggd: dict[tuple, dict] = {}
+        for f in fills:
+            bp = f["buy_price"]
+            if bp <= 0 or remaining < bp:
+                continue
+            qty = min(f["qty"], int(remaining // bp))
+            if qty < 1:
+                continue
+            it = aggd.get(f["key"])
+            if it is None:
+                m = f["m"]
+                bm_hist = agg.get((f["item_id"], config.BLACK_MARKET, f["q"]))
+                it = {
+                    "item_id": f["item_id"], "name": f["name"],
+                    "tier_ench": f"Т{m['tier']}.{m['enchant']}",
+                    "quality": f["q"], "quality_label": config.QUALITY_NAMES.get(f["q"], str(f["q"])),
+                    "category_label": config.CATEGORY_NAMES.get(m["category"], m["category"]),
+                    "qty": 0, "cost": 0.0, "profit": 0.0,
+                    "min_price": bp, "bm_top": f["sell_price"],
+                    "bm_daily": f["bm_daily"], "bm_weekly": bm_hist["vwap"] if bm_hist else 0,
+                }
+                aggd[f["key"]] = it
+            it["qty"] += qty
+            it["cost"] += qty * bp
+            it["profit"] += f["unit_profit"] * qty
+            it["min_price"] = min(it["min_price"], bp)
+            it["bm_top"] = max(it["bm_top"], f["sell_price"])
+            remaining -= qty * bp
+
+        items = []
+        for key, it in aggd.items():
+            qty = it["qty"]
+            cost = it["cost"]
+            if qty < 1:
+                continue
+            avg = cost / qty
+            liq = _clamp(it["bm_daily"] / _LIQUIDITY_REF)
+            cur_net = it["bm_top"] * net - avg
+            wk_net = it["bm_weekly"] * net - avg
+            stab = _clamp(wk_net / cur_net) if cur_net > 0 else 0.0
+            score = round(100.0 * (0.40 + 0.30 * liq + 0.30 * stab))
+            items.append({
+                "item_id": it["item_id"], "name": it["name"], "tier_ench": it["tier_ench"],
+                "quality": it["quality"], "quality_label": it["quality_label"],
+                "category_label": it["category_label"],
+                "qty": qty, "unit_price": it["min_price"], "avg_price": round(avg),
+                "total_cost": round(cost), "bm_buy_now": it["bm_top"],
+                "unit_profit": round(it["profit"] / qty), "total_profit": round(it["profit"]),
+                "profit_pct": round(it["profit"] / cost * 100, 1) if cost else 0.0,
+                "bm_daily_volume": round(it["bm_daily"], 1), "reliability": score,
+                "available": avail.get(key, qty), "source": "live",
+            })
+        items.sort(key=lambda x: x["total_profit"], reverse=True)
+        spent = sum(x["total_cost"] for x in items)
+        profit = sum(x["total_profit"] for x in items)
+        return {
+            "expected_profit": round(profit), "spent": round(spent),
+            "leftover": round(budget - spent),
+            "roi_pct": round(profit / spent * 100, 1) if spent else 0.0,
+            "items_count": len(items), "items": items, "source": "live",
+        }
+
+    def _estimate_plan(self, city, budget, window, min_profit, min_bm_volume,
+                       category, tier, quality, search, net) -> dict:
+        cands = [c for c in self._flip_candidates(window, min_profit, min_bm_volume,
+                                                  category, tier, quality, search)
+                 if c["buy_city"] == city]
+        cands.sort(key=lambda c: c["profit"] / c["buy_price"] if c["buy_price"] else 0.0, reverse=True)
+        cap = config.RECOMMEND_NODEPTH_CAP
+        remaining = float(budget)
+        items = []
+        for c in cands:
             price = c["buy_price"]
             if price <= 0 or remaining < price:
                 continue
-            vol = max(1.0, c["bm_daily_volume"])
-            vol_cap = max(1, int(round(vol * capture)))
-            qty = min(vol_cap, int(remaining // price))
+            qty = min(cap, int(remaining // price))
             if qty < 1:
                 continue
-            # average buy price rises with the share of daily volume you take
-            avg_price = price * (1.0 + slippage * (qty / vol))
-            if avg_price * qty > remaining:
-                qty = int(remaining // avg_price)
-                if qty < 1:
-                    continue
-            cost = avg_price * qty
-            unit_profit = c["bm_buy_now"] * net - avg_price
-            if unit_profit <= 0:
-                continue
-            total_profit = unit_profit * qty
-            items.append(
-                {
-                    "item_id": c["item_id"],
-                    "name": c["name"],
-                    "tier_ench": c["tier_ench"],
-                    "quality": c["quality"],
-                    "quality_label": c["quality_label"],
-                    "category_label": c["category_label"],
-                    "qty": qty,
-                    "unit_price": price,
-                    "avg_price": round(avg_price),
-                    "total_cost": round(cost),
-                    "bm_buy_now": c["bm_buy_now"],
-                    "unit_profit": round(unit_profit),
-                    "total_profit": round(total_profit),
-                    "profit_pct": round(unit_profit / avg_price * 100, 1) if avg_price else 0.0,
-                    "bm_daily_volume": c["bm_daily_volume"],
-                    "reliability": c["reliability"],
-                }
-            )
-            spent += cost
+            cost = price * qty
+            total = c["profit"] * qty
+            items.append({
+                "item_id": c["item_id"], "name": c["name"], "tier_ench": c["tier_ench"],
+                "quality": c["quality"], "quality_label": c["quality_label"],
+                "category_label": c["category_label"],
+                "qty": qty, "unit_price": price, "avg_price": price,
+                "total_cost": round(cost), "bm_buy_now": c["bm_buy_now"],
+                "unit_profit": c["profit"], "total_profit": round(total),
+                "profit_pct": c["profit_pct"], "bm_daily_volume": c["bm_daily_volume"],
+                "reliability": c["reliability"], "available": None, "source": "est",
+            })
             remaining -= cost
-            profit_total += total_profit
-
         items.sort(key=lambda x: x["total_profit"], reverse=True)
+        spent = sum(x["total_cost"] for x in items)
+        profit = sum(x["total_profit"] for x in items)
         return {
-            "expected_profit": round(profit_total),
-            "spent": round(spent),
+            "expected_profit": round(profit), "spent": round(spent),
             "leftover": round(budget - spent),
-            "roi_pct": round(profit_total / spent * 100, 1) if spent else 0.0,
-            "items_count": len(items),
-            "items": items,
+            "roi_pct": round(profit / spent * 100, 1) if spent else 0.0,
+            "items_count": len(items), "items": items, "source": "est",
         }

@@ -162,6 +162,10 @@ tbody tr:last-child td { border-bottom: none; }
 .cell-dim { color: var(--text-mute); }
 .stale { color: var(--red); }
 
+.src { display: inline-block; padding: 1px 6px; border-radius: 5px; font-size: 10px; font-weight: 700; vertical-align: middle; }
+.src-live { background: var(--green-bg); color: var(--green); }
+.src-est { background: rgba(232,194,101,.14); color: var(--gold); }
+
 /* ---- states ---- */
 .empty, .loader {
   display: flex; align-items: center; justify-content: center; gap: 12px;
