@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>shopalbi — сканер рынка Albion Online</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">◈</div>
+        <div>
+          <h1>shopalbi</h1>
+          <p class="sub">Сканер рынка Albion Online · сервер Europe · Чёрный рынок Карлеона</p>
+        </div>
+      </div>
+      <div class="status" id="status">
+        <div class="status-row"><span class="dot" id="statusDot"></span><span id="statusText">Подключение…</span></div>
+        <button class="btn-refresh" id="refreshBtn" title="Обновить данные с сервера">⟳ Обновить</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="mainTabs">
+      <button class="tab active" data-view="flips">🔥 Выгодные флипы</button>
+      <button class="tab" data-view="stats">📊 Средние цены</button>
+    </nav>
+
+    <section class="controls" id="controls">
+      <div class="window-switch" id="windowSwitch">
+        <button class="win active" data-window="day">День</button>
+        <button class="win" data-window="3d">3 дня</button>
+        <button class="win" data-window="week">Неделя</button>
+        <button class="win" data-window="month">Месяц</button>
+      </div>
+
+      <div class="filters">
+        <input type="search" id="search" class="input" placeholder="Поиск предмета…" />
+        <select id="category" class="input"><option value="">Все типы</option></select>
+        <select id="tier" class="input"><option value="">Все тиры</option></select>
+        <select id="quality" class="input"><option value="">Любое качество</option></select>
+        <label class="minprofit" id="minProfitWrap">
+          <span>Мин. прибыль</span>
+          <input type="number" id="minProfit" class="input small" value="1000" step="1000" min="0" />
+        </label>
+      </div>
+    </section>
+
+    <section class="meta-line" id="metaLine"></section>
+
+    <main class="table-wrap">
+      <table id="dataTable">
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="emptyState" hidden></div>
+      <div class="loader" id="loader" hidden><div class="spinner"></div><span>Загрузка…</span></div>
+    </main>
+
+    <footer class="footer">
+      <span>Данные: <a href="https://www.albion-online-data.com" target="_blank" rel="noopener">Albion Online Data Project</a> · названия: ao-bin-dumps</span>
+      <span id="taxNote"></span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
