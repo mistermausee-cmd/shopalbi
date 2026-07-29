@@ -1,0 +1,80 @@
+root@sddfsdfs:~# sudo docker compose exec shopalbi python scripts/export_snapshot.py --out /logs
+no configuration file provided: not found
+root@sddfsdfs:~# cd ~/shopalbi && \
+git fetch --all --prune && \
+git checkout -B v5 origin/feat/v5-audit-and-rebuild && \
+sudo docker compose up -d --build && \
+echo '--- ждём старт ---' && sleep 30 && \
+curl -s localhost:8000/api/health && echo && \
+sudo tail -n 25 /root/logs/shopalbi.log
+remote: Enumerating objects: 45, done.
+remote: Counting objects: 100% (45/45), done.
+remote: Compressing objects: 100% (17/17), done.
+remote: Total 32 (delta 14), reused 29 (delta 11), pack-reused 0 (from 0)
+Unpacking objects: 100% (32/32), 382.37 KiB | 19.12 MiB/s, done.
+From https://github.com/mistermausee-cmd/shopalbi
+   3c5c585..b950e57  feat/v5-audit-and-rebuild -> origin/feat/v5-audit-and-rebuild
+   4573573..e1dd5c9  logs       -> origin/logs
+branch 'v5' set up to track 'origin/feat/v5-audit-and-rebuild'.
+Reset branch 'v5'
+Your branch is up to date with 'origin/feat/v5-audit-and-rebuild'.
+[+] Building 1.8s (14/14) FINISHED
+ => [internal] load local bake definitions                                 0.0s
+ => => reading from stdin 490B                                             0.0s
+ => [internal] load build definition from Dockerfile                       0.0s
+ => => transferring dockerfile: 744B                                       0.0s
+ => [internal] load metadata for docker.io/library/python:3.12-slim        0.7s
+ => [internal] load .dockerignore                                          0.0s
+ => => transferring context: 153B                                          0.0s
+ => [1/7] FROM docker.io/library/python:3.12-slim@sha256:57cd7c3a7a273101  0.0s
+ => => resolve docker.io/library/python:3.12-slim@sha256:57cd7c3a7a273101  0.0s
+ => [internal] load build context                                          0.0s
+ => => transferring context: 106.80kB                                      0.0s
+ => CACHED [2/7] WORKDIR /app                                              0.0s
+ => CACHED [3/7] COPY backend/requirements.txt backend/requirements.txt    0.0s
+ => CACHED [4/7] RUN pip install --no-cache-dir -r backend/requirements.t  0.0s
+ => [5/7] COPY backend/ backend/                                           0.1s
+ => [6/7] COPY frontend/ frontend/                                         0.1s
+ => [7/7] WORKDIR /app/backend                                             0.1s
+ => exporting to image                                                     0.5s
+ => => exporting layers                                                    0.3s
+ => => exporting manifest sha256:32e0ca6e0c29f536098c68c17c37342cecc2a7bc  0.0s
+ => => exporting config sha256:6cf0173d9cfc6d458328904c0e49ee17534a718702  0.0s
+ => => exporting attestation manifest sha256:d5cf58802d087f27ba8c67dbf8a9  0.0s
+ => => exporting manifest list sha256:7dc28b0fbd05ef697b647003f7a8db0b623  0.0s
+ => => naming to docker.io/library/shopalbi-shopalbi:latest                0.0s
+ => => unpacking to docker.io/library/shopalbi-shopalbi:latest             0.1s
+ => resolving provenance for metadata file                                 0.0s
+[+] up 2/2
+ ✔ Image shopalbi-shopalbi Built                                            1.9s
+ ✔ Container shopalbi      Started                                          0.8s
+--- ждём старт ---
+{"status":"ok","version":"5.1.0"}
+2026-07-29 22:44:31,581 INFO apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-29 22:44:31,582 INFO apscheduler.scheduler: Added job "RefreshManager.job_current" to job store "default"
+2026-07-29 22:44:31,582 INFO apscheduler.scheduler: Added job "RefreshManager.job_history" to job store "default"
+2026-07-29 22:44:31,582 INFO apscheduler.scheduler: Scheduler started
+2026-07-29 22:44:31,582 INFO shopalbi.scheduler: scheduler started: current every 5 min, history every 4 h
+2026-07-29 22:44:31,586 INFO shopalbi.nats: NATS consumer started (topics=marketorders.deduped,marketorders.deduped.bulk)
+2026-07-29 22:44:31,586 INFO shopalbi: kicking off initial data refresh
+2026-07-29 22:44:31,586 INFO uvicorn.error: Application startup complete.
+2026-07-29 22:44:31,586 INFO uvicorn.error: Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-07-29 22:44:31,594 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-29 22:44:31,683 INFO shopalbi.nats: connected to NATS feed nats.albion-online-data.com:34222
+2026-07-29 22:44:31,683 INFO shopalbi.nats: subscribed to marketorders.deduped
+2026-07-29 22:44:31,683 INFO shopalbi.nats: subscribed to marketorders.deduped.bulk
+2026-07-29 22:44:36,130 INFO uvicorn.access: 127.0.0.1:57300 - "GET /api/health HTTP/1.1" 200
+2026-07-29 22:44:43,612 INFO uvicorn.access: 85.164.244.215:59576 - "GET /api/status HTTP/1.1" 200
+2026-07-29 22:44:44,521 INFO uvicorn.access: 85.164.244.215:59576 - "GET / HTTP/1.1" 200
+2026-07-29 22:44:44,618 INFO uvicorn.access: 85.164.244.215:59576 - "GET /styles.css?v=5.1.0 HTTP/1.1" 200
+2026-07-29 22:44:44,645 INFO uvicorn.access: 85.164.244.215:59576 - "GET /app.js?v=5.1.0 HTTP/1.1" 200
+2026-07-29 22:44:44,732 INFO uvicorn.access: 85.164.244.215:59576 - "GET /api/meta HTTP/1.1" 200
+2026-07-29 22:44:44,910 INFO uvicorn.access: 85.164.244.215:59576 - "GET /api/status HTTP/1.1" 200
+2026-07-29 22:44:45,470 INFO uvicorn.access: 85.164.244.215:50453 - "GET /api/flips?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&limit=400&sort=opportunity&direction=desc HTTP/1.1" 200
+2026-07-29 22:44:47,717 INFO shopalbi.storage: bm_offer rebuilt: 27990 rows (max age 3.0 h)
+2026-07-29 22:44:47,717 INFO shopalbi.engine: current prices stored: 256080 rows in 16.1s
+2026-07-29 22:44:47,767 INFO shopalbi.engine: refreshing 90-day history for 6402 items
+2026-07-29 22:45:00,956 INFO uvicorn.access: 172.18.0.1:51708 - "GET /api/health HTTP/1.1" 200
+root@sddfsdfs:~/shopalbi# sudo docker compose exec shopalbi python scripts/export_snapshot.py --out /logs
+python: can't open file '/app/backend/scripts/export_snapshot.py': [Errno 2] No such file or directory
+root@sddfsdfs:~/shopalbi#
