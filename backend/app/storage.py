@@ -28,7 +28,10 @@ from .catalog import Item
 
 log = logging.getLogger("shopalbi.storage")
 
-_SCHEMA = """
+# Tables first, then column migrations, then indexes. An index on a column
+# that an older database has not got yet would abort the whole upgrade, so
+# index creation deliberately runs last (see Storage.__init__).
+_SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS items (
     item_id   TEXT PRIMARY KEY,
     base_id   TEXT NOT NULL,
@@ -41,9 +44,6 @@ CREATE TABLE IF NOT EXISTS items (
     name_disp TEXT NOT NULL DEFAULT '',
     name_norm TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_items_cat  ON items(category);
-CREATE INDEX IF NOT EXISTS idx_items_tier ON items(tier);
-CREATE INDEX IF NOT EXISTS idx_items_norm ON items(name_norm);
 
 CREATE TABLE IF NOT EXISTS current_prices (
     item_id             TEXT NOT NULL,
@@ -56,7 +56,6 @@ CREATE TABLE IF NOT EXISTS current_prices (
     fetched_at          TEXT NOT NULL,
     PRIMARY KEY (item_id, city, quality)
 );
-CREATE INDEX IF NOT EXISTS idx_cp_city_item ON current_prices(city, item_id, quality);
 
 CREATE TABLE IF NOT EXISTS history (
     item_id    TEXT NOT NULL,
@@ -67,7 +66,6 @@ CREATE TABLE IF NOT EXISTS history (
     avg_price  INTEGER NOT NULL,
     PRIMARY KEY (item_id, city, quality, day)
 );
-CREATE INDEX IF NOT EXISTS idx_hist_day ON history(day);
 
 -- Rolled-up history per window. Rebuilt after every history refresh.
 CREATE TABLE IF NOT EXISTS agg (
@@ -82,7 +80,6 @@ CREATE TABLE IF NOT EXISTS agg (
     last_day TEXT,
     PRIMARY KEY (window, item_id, city, quality)
 );
-CREATE INDEX IF NOT EXISTS idx_agg_lookup ON agg(window, city, item_id, quality);
 
 -- Best Black Market bid reachable for an item you hold at a given quality.
 -- Encodes the game rule "a buy order accepts its own quality or higher", so
@@ -113,6 +110,15 @@ CREATE TABLE IF NOT EXISTS order_book (
     expires  TEXT,
     seen_at  TEXT NOT NULL
 );
+"""
+
+_SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_items_cat  ON items(category);
+CREATE INDEX IF NOT EXISTS idx_items_tier ON items(tier);
+CREATE INDEX IF NOT EXISTS idx_items_norm ON items(name_norm);
+CREATE INDEX IF NOT EXISTS idx_cp_city_item ON current_prices(city, item_id, quality);
+CREATE INDEX IF NOT EXISTS idx_hist_day ON history(day);
+CREATE INDEX IF NOT EXISTS idx_agg_lookup ON agg(window, city, item_id, quality);
 CREATE INDEX IF NOT EXISTS idx_ob_lookup ON order_book(city, side, item_id, quality);
 CREATE INDEX IF NOT EXISTS idx_ob_seen   ON order_book(seen_at);
 """
@@ -126,6 +132,24 @@ _MIGRATIONS = [
 
 _QUALITY_UNION = " UNION ALL ".join(f"SELECT {q} AS quality" for q in config.QUALITIES)
 
+# Bump when previously stored rows become *semantically wrong* (not merely
+# stale), so an upgrade discards them instead of serving bad data.
+#
+#   2 -> v5.0: releases before this wrote the order book with Caerleon and the
+#              Black Market swapped (location ids 3003/3005 were inverted).
+#              Those rows would keep poisoning live depth for up to
+#              ORDER_MAX_AGE_MINUTES after the upgrade, so the book is purged.
+#              `agg`/`bm_offer` are rebuilt on every refresh anyway, but they are
+#              cleared too so nothing derived from the old model can be read
+#              before the first refresh completes.
+DATA_EPOCH = 2
+_EPOCH_PURGE = ["order_book", "agg", "bm_offer"]
+
+# Allow-list for the only place a table name reaches SQL as a string.
+_KNOWN_TABLES = frozenset(
+    {"items", "current_prices", "history", "agg", "bm_offer", "meta", "order_book"}
+)
+
 
 def _placeholders(n: int) -> str:
     return ",".join("?" * n)
@@ -137,8 +161,10 @@ class Storage:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         with self._connect() as conn:
-            conn.executescript(_SCHEMA)
+            conn.executescript(_SCHEMA_TABLES)
             self._migrate(conn)
+            conn.executescript(_SCHEMA_INDEXES)
+            self._apply_epoch(conn)
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         for table, column, ddl in _MIGRATIONS:
@@ -147,6 +173,34 @@ class Storage:
                 log.info("migrating: %s", ddl)
                 conn.execute(ddl)
         conn.commit()
+
+    def _apply_epoch(self, conn: sqlite3.Connection) -> None:
+        """Discard rows written under an older, incorrect data model."""
+        row = conn.execute("SELECT value FROM meta WHERE key='data_epoch'").fetchone()
+        try:
+            found = int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            found = 0
+        if found >= DATA_EPOCH:
+            return
+        for table in _EPOCH_PURGE:
+            try:
+                n = conn.execute(f"DELETE FROM {table}").rowcount
+                if n:
+                    log.warning(
+                        "data epoch %d -> %d: purged %d rows from %s "
+                        "(written under the old swapped-location model)",
+                        found, DATA_EPOCH, n, table,
+                    )
+            except sqlite3.Error:
+                log.debug("could not purge %s", table, exc_info=True)
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('data_epoch', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(DATA_EPOCH),),
+        )
+        conn.commit()
+        log.info("data epoch set to %d", DATA_EPOCH)
 
     def _connect(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -202,6 +256,28 @@ class Storage:
         with self.cursor() as cur:
             cur.execute("SELECT COUNT(*) AS n FROM items")
             return cur.fetchone()["n"]
+
+    def table_empty(self, table: str) -> bool:
+        if table not in _KNOWN_TABLES:
+            raise ValueError(f"unknown table {table!r}")
+        with self.cursor() as cur:
+            cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
+            return cur.fetchone() is None
+
+    def catalog_needs_rebuild(self) -> bool:
+        """True when the catalog is missing or predates a column we now rely on.
+
+        `name_disp`/`name_norm` are added empty by the column migration, and
+        search matches on `name_norm` — so an upgraded database would silently
+        return nothing for every search until the catalog was rebuilt. Detect it
+        and rebuild instead of waiting for someone to notice.
+        """
+        with self.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM items")
+            if cur.fetchone()["n"] == 0:
+                return True
+            cur.execute("SELECT 1 FROM items WHERE name_norm = '' LIMIT 1")
+            return cur.fetchone() is not None
 
     # -- current prices -----------------------------------------------------
 

@@ -181,7 +181,7 @@ def _sort_and_slice(rows: list[dict], sort: str, direction: str, keys: dict, lim
 # --------------------------------------------------------------------------
 
 def ensure_catalog(storage: Storage, force: bool = False) -> int:
-    if not force and storage.item_count() > 0:
+    if not force and not storage.catalog_needs_rebuild():
         return storage.item_count()
     items = build_items(force=force)
     n = storage.replace_items(items)
@@ -189,6 +189,25 @@ def ensure_catalog(storage: Storage, force: bool = False) -> int:
     storage.set_meta("catalog_count", str(n))
     log.info("catalog stored: %d items", n)
     return n
+
+
+def ensure_derived(storage: Storage) -> None:
+    """Rebuild `agg`/`bm_offer` from stored raw data if they are missing.
+
+    Raw tables (`history`, `current_prices`) survive an upgrade, but the derived
+    ones get dropped whenever the data model changes. Recomputing them at startup
+    is a couple of SQL statements and avoids an empty-looking site while the
+    first full refresh runs.
+    """
+    try:
+        if storage.table_empty("agg") and not storage.table_empty("history"):
+            log.info("derived tables missing after upgrade: rebuilding aggregates")
+            storage.rebuild_aggregates()
+        if storage.table_empty("bm_offer") and not storage.table_empty("current_prices"):
+            log.info("derived tables missing after upgrade: rebuilding Black Market offers")
+            storage.rebuild_bm_offers()
+    except Exception:
+        log.exception("could not rebuild derived tables; the next refresh will fix it")
 
 
 def refresh_current(storage: Storage, client: AodpClient) -> int:

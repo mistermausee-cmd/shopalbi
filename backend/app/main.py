@@ -73,6 +73,12 @@ async def lifespan(app: FastAPI):
     client = AodpClient()
     _analytics = Analytics(_storage)
     engine.ensure_catalog(_storage)
+    # After an upgrade the derived tables are empty (they are rebuilt from
+    # scratch whenever the data model changes), while `history` and
+    # `current_prices` survive. Rebuilding them here costs a second or two and
+    # means the site has real numbers immediately instead of looking empty until
+    # the first full refresh finishes a couple of minutes later.
+    engine.ensure_derived(_storage)
     _manager = RefreshManager(_storage, client, _analytics)
     _manager.start()
     if config.NATS_ENABLE:
