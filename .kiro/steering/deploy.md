@@ -49,6 +49,22 @@ curl -s localhost:8000/api/health
    пересоздаёт контейнер. Останавливать вручную не нужно, и это стоит сказать,
    потому что вопрос задавался.
 
+## Команды обслуживания внутри контейнера
+
+Всегда с `cd ~/shopalbi` (иначе `docker compose` ответит
+`no configuration file provided: not found`) и **по абсолютному пути**: рабочая
+папка в контейнере — `/app/backend`, а скрипты лежат в `/app/scripts`.
+
+```bash
+cd ~/shopalbi && sudo docker compose exec shopalbi python /app/scripts/audit.py --window week --top 10
+cd ~/shopalbi && sudo docker compose exec shopalbi python /app/scripts/export_snapshot.py --out /logs
+```
+
+Всё, что должно быть доступно в контейнере, обязано копироваться в `Dockerfile`.
+Один раз уже забыли `COPY scripts/` и выдали неработающую инструкцию. Прежде чем
+писать команду `docker compose exec ...` в ответ — проверить её в собранном
+образе, а не по исходникам.
+
 ## Что ещё упоминать рядом с командой
 
 - Данные лежат в named volume `shopalbi-data` и переживают обновление; миграции

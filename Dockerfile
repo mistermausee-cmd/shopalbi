@@ -14,6 +14,10 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 # App code
 COPY backend/ backend/
 COPY frontend/ frontend/
+# Maintenance tools (audit + snapshot export). They land in /app/scripts, while
+# the final WORKDIR below is /app/backend, so invoke them by absolute path:
+#   docker compose exec shopalbi python /app/scripts/audit.py
+COPY scripts/ scripts/
 
 # Data (SQLite + catalog cache) lives on a mounted volume
 ENV SHOPALBI_DATA_DIR=/data \

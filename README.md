@@ -165,8 +165,11 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 `MISMATCH`, если что-то расходится, а не соглашается сама с собой:
 
 ```bash
-sudo docker compose exec shopalbi python scripts/audit.py --window week --top 10
+cd ~/shopalbi && sudo docker compose exec shopalbi python /app/scripts/audit.py --window week --top 10
 ```
+
+Путь абсолютный не случайно: рабочая папка внутри контейнера — `/app/backend`,
+а скрипты лежат в `/app/scripts`.
 
 Показывает: состав окон и сверку VWAP вручную, лестницу качества с возрастом
 каждой ставки, полный вывод прибыли по топовым флипам (затраты → налог →
@@ -179,7 +182,7 @@ sudo docker compose exec shopalbi python scripts/audit.py --window week --top 10
 котировки на момент снимка и свёрнутую историю:
 
 ```bash
-sudo docker compose exec shopalbi python scripts/export_snapshot.py --out /logs
+cd ~/shopalbi && sudo docker compose exec shopalbi python /app/scripts/export_snapshot.py --out /logs
 ```
 
 Файл появится в `/root/logs/shopalbi-snapshot-<дата>.db.gz`. Копия снимается
