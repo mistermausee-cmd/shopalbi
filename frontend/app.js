@@ -269,7 +269,7 @@ function colsFlips() {
 }
 
 function colsPlan() {
-  return [
+  const cols = [
     { key: 'name', label: 'Предмет', left: true, stick: true, value: (r) => r.name, render: nameCell,
       csv: (r) => `${r.name} ${r.tier_ench} ${qualityRu(r.quality)}` },
     { key: 'qty', label: 'Купить, шт', value: (r) => r.qty,
@@ -311,10 +311,14 @@ function colsPlan() {
     { key: 'reliability', label: 'Надёжность', value: (r) => r.reliability, hint: H.rel,
       render: (r) => scoreCell(r.reliability), csv: (r) => r.reliability },
   ];
+  if (state.rank.length) cols.splice(1, 0, {
+    key: 'rank_score', label: 'Отбор', render: rankCell, csv: (r) => r.rank_score,
+  });
+  return cols;
 }
 
 function colsCities() {
-  return [
+  const cols = [
     { key: 'city', label: 'Город', left: true, stick: true, value: (r) => cityRu(r.city),
       render: (r) => `<div class="item-name"><span class="city" style="font-size:14px">${esc(cityRu(r.city))}</span></div>`
         + `<div class="item-sub"><span class="pill ${r.gank_rate > 0 ? 'risk' : 'safe'}" title="Шанс потерять груз по дороге в Карлеон">риск ${r.gank_rate}%</span>`
@@ -344,6 +348,10 @@ function colsCities() {
         : '<span class="dimc">—</span>',
       csv: (r) => r.best_item },
   ];
+  if (state.rank.length) cols.splice(1, 0, {
+    key: 'rank_score', label: 'Отбор', render: rankCell, csv: (r) => r.rank_score,
+  });
+  return cols;
 }
 
 function colsStats() {
@@ -380,6 +388,9 @@ function colsStats() {
       : '<span class="dimc">—</span>',
     csv: (r) => cityRu(r.cheapest_city),
   });
+  if (state.rank.length) cols.splice(1, 0, {
+    key: 'rank_score', label: 'Отбор', render: rankCell, csv: (r) => r.rank_score,
+  });
   return cols;
 }
 
@@ -392,23 +403,43 @@ function buildColumns() {
 
 // ---------------------------------------------------------------- render
 
-const rankable = (key) => state.view === 'flips' && key in RANK_LABELS;
+const rankable = (key) => state.view !== 'sets' && key in rankableKeys();
+
+// Which columns are rankable depends on the view: flips has 13, but plan, cities
+// and stats each show different metrics. Columns declared with a `value` (the
+// client-sorted ones) are automatically rankable; server-sorted ones need to be
+// in RANK_LABELS already. The logic below unifies both.
+function rankableKeys() {
+  const cols = buildColumns();
+  const out = {};
+  for (const c of cols) {
+    // Any column with a key in RANK_LABELS is server-rankable (flips)
+    if (c.key in RANK_LABELS) { out[c.key] = RANK_LABELS[c.key]; continue; }
+    // Client-sorted columns on plan/cities/stats are also rankable
+    if (c.value && c.key !== 'name' && c.key !== 'city' && c.key !== 'buy_city') {
+      out[c.key] = c.label;
+    }
+  }
+  return out;
+}
 
 function renderHead(cols) {
   const s = state.sort[state.view];
-  const on = state.rankMode && state.view === 'flips';
+  const on = state.rankMode && state.view !== 'sets';
+  const rk = rankableKeys();
   $('#thead').innerHTML = '<tr>' + cols.map((c) => {
     const inRank = state.rank.indexOf(c.key) >= 0;
     const sorted = !state.rank.length && c.key === s.key;
+    const isRankable = on && (c.key in rk);
     const cls = [c.left ? 'left' : '', c.stick ? 'stick' : '', sorted ? 'sorted' : '',
-      inRank ? 'ranked' : '', on && rankable(c.key) ? 'rankable' : ''].filter(Boolean).join(' ');
+      inRank ? 'ranked' : '', isRankable ? 'rankable' : ''].filter(Boolean).join(' ');
     let mark;
     if (inRank) mark = '<span class="arrow">✦</span>';
     else if (sorted) mark = `<span class="arrow">${s.dir === 'asc' ? '▲' : '▼'}</span>`;
-    else if (on && rankable(c.key)) mark = '<span class="arrow" style="opacity:.35">+</span>';
+    else if (isRankable) mark = '<span class="arrow" style="opacity:.35">+</span>';
     else mark = '<span class="arrow" style="opacity:.22">▽</span>';
     let hint = c.hint || '';
-    if (on && rankable(c.key)) {
+    if (isRankable) {
       hint = (inRank ? 'В отборе. Клик — убрать. ' : 'Клик — добавить в отбор. ') + hint;
     }
     const t = hint ? ` title="${esc(hint)}"` : '';
@@ -436,10 +467,11 @@ function toggleRank(key) {
 
 function renderRankBar() {
   const bar = $('#rankBar');
-  bar.hidden = !(state.rankMode && state.view === 'flips');
-  $('#rankBtn').classList.toggle('on', state.rankMode && state.view === 'flips');
+  bar.hidden = !(state.rankMode && state.view !== 'sets');
+  $('#rankBtn').classList.toggle('on', state.rankMode && state.view !== 'sets');
   if (bar.hidden) return;
   const chips = $('#rankChips');
+  const rk = rankableKeys();
   if (!state.rank.length) {
     chips.innerHTML = '';
     $('#rankHint').textContent =
@@ -448,7 +480,7 @@ function renderRankBar() {
   }
   $('#rankHint').textContent = `В отборе ${state.rank.length}: позиции упорядочены по совокупности этих показателей.`;
   chips.innerHTML = state.rank.map((k, i) =>
-    `<span class="chip"><b>${i + 1}</b>${esc(RANK_LABELS[k] || k)}`
+    `<span class="chip"><b>${i + 1}</b>${esc(rk[k] || RANK_LABELS[k] || k)}`
     + `<button data-rm="${esc(k)}" title="Убрать из отбора">×</button></span>`).join('');
   chips.querySelectorAll('button[data-rm]').forEach((b) => {
     b.addEventListener('click', () => toggleRank(b.dataset.rm));
@@ -471,11 +503,49 @@ function onSort(key) {
 }
 
 function sortedRows(cols) {
+  if (!CLIENT_SORTED.has(state.view) && !state.rank.length) return state.rows;
+  const rows = state.rows.slice();
+
+  // Composite ranking takes priority over single-column sort, and it works
+  // identically whether the view is server-sorted or client-sorted. The only
+  // difference is where the ranking computation happens: for flips it runs on the
+  // server (all candidates), for the others it runs right here (the response is
+  // already the full set).
+  if (state.rank.length) {
+    const rk = rankableKeys();
+    const used = state.rank.filter((k) => k in rk);
+    if (used.length) {
+      // Compute percentiles on all rows, then sort.
+      const byKey = {};
+      for (const k of used) {
+        const col = cols.find((c) => c.key === k);
+        const getValue = col && col.value ? col.value : (r) => r[k];
+        const vals = rows.map(getValue);
+        const higher = !(k === 'absorb' || k === 'absorb_h' || k === 'buy_price'
+                        || k === 'unit_price' || k === 'avg_price');
+        byKey[k] = clientPercentiles(vals, higher);
+      }
+      for (let i = 0; i < rows.length; i++) {
+        const parts = {};
+        let sum = 0;
+        for (const k of used) {
+          const v = Math.round(byKey[k][i] * 100);
+          parts[k] = v;
+          sum += v;
+        }
+        rows[i] = { ...rows[i], rank_parts: parts, rank_score: Math.round(sum / used.length),
+          rank_exact: sum / used.length };
+      }
+      const s = state.sort[state.view];
+      rows.sort((a, b) => s.dir === 'asc' ? a.rank_exact - b.rank_exact : b.rank_exact - a.rank_exact);
+      return rows;
+    }
+  }
+
   if (!CLIENT_SORTED.has(state.view)) return state.rows;
-  const s = state.sort[state.view];                 // <- per-view, not always `cities`
+  const s = state.sort[state.view];
   const col = cols.find((c) => c.key === s.key);
   if (!col || !col.value) return state.rows;
-  const rows = state.rows.slice();
   rows.sort((a, b) => {
     const av = col.value(a), bv = col.value(b);
     const r = (typeof av === 'string' || typeof bv === 'string')
@@ -484,6 +554,27 @@ function sortedRows(cols) {
     return s.dir === 'asc' ? r : -r;
   });
   return rows;
+}
+
+// Percentile position of each value (0..1). Same logic as the server-side
+// `_percentiles`, so the composite ranking looks and behaves identically
+// regardless of whether it ran in Python or here.
+function clientPercentiles(values, higherIsBetter) {
+  const n = values.length;
+  if (n <= 1) return values.map(() => 1.0);
+  const indices = Array.from({ length: n }, (_, i) => i);
+  indices.sort((a, b) => higherIsBetter ? values[b] - values[a] : values[a] - values[b]);
+  const out = new Array(n);
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && values[indices[j + 1]] === values[indices[i]]) j++;
+    const avg = (i + j) / 2;
+    const score = 1 - avg / (n - 1);
+    for (let k = i; k <= j; k++) out[indices[k]] = score;
+    i = j + 1;
+  }
+  return out;
 }
 
 const EMPTY_MSG = {
@@ -1072,7 +1163,9 @@ function syncControls() {
   }
   $('#budgetWrap').hidden = v !== 'plan';
   $('#buyCity').hidden = !(v === 'flips' || v === 'plan');
-  $('#rankBtn').hidden = v !== 'flips';
+  // Composite ranking is available on every tab EXCEPT sets (which has its own
+  // concept of "best city" and a fixed ordering).
+  $('#rankBtn').hidden = false;
   renderRankBar();
   const modelUsed = v !== 'stats';
   $('#advBtn').hidden = !modelUsed;
