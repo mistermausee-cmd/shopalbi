@@ -35,6 +35,14 @@ const CITY_RU = {
 };
 const cityRu = (c) => CITY_RU[c] || c || '—';
 
+// Prepositional case, so headings read "в Бресилиане" rather than "в Бресилиан".
+const CITY_IN = {
+  'Bridgewatch': 'Бриджуотче', 'Fort Sterling': 'Форт-Стерлинге', 'Lymhurst': 'Лимхёрсте',
+  'Martlock': 'Мартлоке', 'Thetford': 'Тетфорде', 'Caerleon': 'Карлеоне',
+  'Brecilien': 'Бресилиане', 'Black Market': 'Чёрном рынке',
+};
+const cityIn = (c) => CITY_IN[c] || cityRu(c);
+
 // Quality names, filled from /api/meta so the backend stays the single source
 // of truth. Fallback matches the in-game RU client wording.
 const QUALITY_RU = {
@@ -117,6 +125,23 @@ const state = {
     cities: { key: 'score',       dir: 'desc' },
     stats:  { key: 'bm_volume',   dir: 'desc' },
   },
+  // Composite ranking: several criteria at once instead of one sort column.
+  rankMode: false,
+  rank: [],
+  // «Мои сеты»
+  sets: [],
+  setId: null,
+  setLines: [],
+  setPrice: null,
+};
+
+// Criteria the server can rank by jointly, with how to read each one.
+const RANK_LABELS = {
+  profit: 'Прибыль/шт', profit_pct: 'Прибыль %', ev_unit: 'С учётом риска',
+  ev_pct: '% с учётом риска', opportunity: 'Оценка', throughput: 'Потенциал/день',
+  reliability: 'Надёжность', bm_volume: 'ЧР шт/день', available: 'Доступно',
+  profit_vwap: 'По средней ЧР', bm_trend: 'Тренд',
+  absorb: 'Выкуп быстрее', buy_price: 'Цена ниже',
 };
 
 // Columns where the first click should sort ascending (cheaper / sooner / A-Z).
@@ -178,8 +203,18 @@ const H = {
   ask: 'Самый дешёвый чужой sell-ордер, уже стоящий на ЧР. Если он ниже ставки выкупа — этих продавцов обслужат раньше тебя.',
 };
 
+function rankCell(r) {
+  if (r.rank_score == null) return '<span class="dimc">—</span>';
+  const parts = Object.entries(r.rank_parts || {})
+    .map(([k, v]) => `${RANK_LABELS[k] || k}: ${v}`).join('\n');
+  const c = scoreColor(r.rank_score);
+  return `<div class="score" title="${esc('Процентиль по каждому показателю:\n' + parts)}">`
+       + `<span class="score-bar"><i style="width:${r.rank_score}%;background:${c}"></i></span>`
+       + `<span class="score-val" style="color:${c}">${r.rank_score}</span></div>`;
+}
+
 function colsFlips() {
-  return [
+  const cols = [
     { key: 'name', label: 'Предмет', left: true, stick: true, hint: H.item, render: nameCell,
       csv: (r) => `${r.name} ${r.tier_ench} ${qualityRu(r.quality)}` },
     { key: 'opportunity', label: 'Оценка', hint: H.opportunity,
@@ -219,6 +254,18 @@ function colsFlips() {
     { key: 'throughput', label: 'Потенциал/день', hint: H.throughput,
       render: (r) => `<span class="num dimc">${compact(r.throughput)}</span>`, csv: (r) => r.throughput },
   ];
+  // When criteria are active, show the resulting score right after the name so
+  // it is obvious what the list is ordered by.
+  if (state.rank.length) {
+    cols.splice(1, 0, {
+      key: 'rank_score', label: 'Отбор',
+      hint: 'Совокупная оценка по выбранным показателям. Для каждого считается процентиль'
+          + ' среди ВСЕХ подходящих позиций (устойчиво к выбросам), затем берётся среднее.'
+          + ' 100 — лучший по всем выбранным показателям одновременно.',
+      render: rankCell, csv: (r) => r.rank_score,
+    });
+  }
+  return cols;
 }
 
 function colsPlan() {
@@ -345,19 +392,66 @@ function buildColumns() {
 
 // ---------------------------------------------------------------- render
 
+const rankable = (key) => state.view === 'flips' && key in RANK_LABELS;
+
 function renderHead(cols) {
   const s = state.sort[state.view];
+  const on = state.rankMode && state.view === 'flips';
   $('#thead').innerHTML = '<tr>' + cols.map((c) => {
-    const sorted = c.key === s.key;
-    const cls = [c.left ? 'left' : '', c.stick ? 'stick' : '', sorted ? 'sorted' : ''].filter(Boolean).join(' ');
-    const arrow = sorted
-      ? `<span class="arrow">${s.dir === 'asc' ? '▲' : '▼'}</span>`
-      : '<span class="arrow" style="opacity:.22">▽</span>';
-    const t = c.hint ? ` title="${esc(c.hint)}"` : '';
-    return `<th class="${cls}" data-sort="${esc(c.key)}"${t}>${esc(c.label)}${arrow}</th>`;
+    const inRank = state.rank.indexOf(c.key) >= 0;
+    const sorted = !state.rank.length && c.key === s.key;
+    const cls = [c.left ? 'left' : '', c.stick ? 'stick' : '', sorted ? 'sorted' : '',
+      inRank ? 'ranked' : '', on && rankable(c.key) ? 'rankable' : ''].filter(Boolean).join(' ');
+    let mark;
+    if (inRank) mark = '<span class="arrow">✦</span>';
+    else if (sorted) mark = `<span class="arrow">${s.dir === 'asc' ? '▲' : '▼'}</span>`;
+    else if (on && rankable(c.key)) mark = '<span class="arrow" style="opacity:.35">+</span>';
+    else mark = '<span class="arrow" style="opacity:.22">▽</span>';
+    let hint = c.hint || '';
+    if (on && rankable(c.key)) {
+      hint = (inRank ? 'В отборе. Клик — убрать. ' : 'Клик — добавить в отбор. ') + hint;
+    }
+    const t = hint ? ` title="${esc(hint)}"` : '';
+    return `<th class="${cls}" data-sort="${esc(c.key)}"${t}>${esc(c.label)}${mark}</th>`;
   }).join('') + '</tr>';
   $('#thead').querySelectorAll('th[data-sort]').forEach((th) => {
-    th.addEventListener('click', () => onSort(th.dataset.sort));
+    th.addEventListener('click', () => {
+      if (state.rankMode && rankable(th.dataset.sort)) toggleRank(th.dataset.sort);
+      else onSort(th.dataset.sort);
+    });
+  });
+}
+
+// Toggle a criterion in/out of the composite. Clicking the same column again
+// removes it, which is the whole point: the filter is undone the same way it
+// was applied.
+function toggleRank(key) {
+  const i = state.rank.indexOf(key);
+  if (i >= 0) state.rank.splice(i, 1);
+  else state.rank.push(key);
+  renderRankBar();
+  if (state.cols) renderHead(state.cols);
+  load();
+}
+
+function renderRankBar() {
+  const bar = $('#rankBar');
+  bar.hidden = !(state.rankMode && state.view === 'flips');
+  $('#rankBtn').classList.toggle('on', state.rankMode && state.view === 'flips');
+  if (bar.hidden) return;
+  const chips = $('#rankChips');
+  if (!state.rank.length) {
+    chips.innerHTML = '';
+    $('#rankHint').textContent =
+      'Кликай по заголовкам столбцов — они складываются в общий отбор. Клик по тому же столбцу снимает его.';
+    return;
+  }
+  $('#rankHint').textContent = `В отборе ${state.rank.length}: позиции упорядочены по совокупности этих показателей.`;
+  chips.innerHTML = state.rank.map((k, i) =>
+    `<span class="chip"><b>${i + 1}</b>${esc(RANK_LABELS[k] || k)}`
+    + `<button data-rm="${esc(k)}" title="Убрать из отбора">×</button></span>`).join('');
+  chips.querySelectorAll('button[data-rm]').forEach((b) => {
+    b.addEventListener('click', () => toggleRank(b.dataset.rm));
   });
 }
 
@@ -560,7 +654,12 @@ function filters() {
   const s = state.sort[state.view];
   p.set('sort', s.key);
   p.set('direction', s.dir);
-  if (state.view === 'flips') { const c = $('#buyCity').value; if (c) p.set('buy_city', c); }
+  if (state.view === 'flips') {
+    const c = $('#buyCity').value; if (c) p.set('buy_city', c);
+    // Composite ranking is applied server-side over ALL candidates, so the top
+    // of the list is the best combination overall, not just within one page.
+    if (state.rank.length) p.set('rank', state.rank.join(','));
+  }
   return p;
 }
 
@@ -624,6 +723,276 @@ function exportCsv() {
   toast(`Выгружено строк: ${rows.length}`, 'ok');
 }
 
+// ---------------------------------------------------------------- my sets
+
+async function setsLoadList(selectId) {
+  const d = await fetchJSON('/api/sets');
+  state.sets = d.rows || [];
+  const box = $('#setsList');
+  if (!state.sets.length) {
+    box.innerHTML = '<div class="state">Пока нет ни одного сета.<br>Нажми «+ Новый».</div>';
+  } else {
+    box.innerHTML = state.sets.map((s) =>
+      `<div class="set-item${s.set_id === state.setId ? ' active' : ''}" data-id="${s.set_id}">`
+      + `<div class="set-item-name">${esc(s.name)}</div>`
+      + `<div class="set-item-sub">позиций: ${s.lines}${s.note ? ' · ' + esc(s.note) : ''}</div></div>`
+    ).join('');
+    box.querySelectorAll('.set-item').forEach((el) => {
+      el.addEventListener('click', () => setsOpen(Number(el.dataset.id)));
+    });
+  }
+  if (selectId) await setsOpen(selectId);
+  else if (!state.setId && state.sets.length) await setsOpen(state.sets[0].set_id);
+  else setsTogglePanels();
+}
+
+function setsTogglePanels() {
+  const has = state.setId != null;
+  $('#setsEmpty').hidden = has;
+  $('#setsEditor').hidden = !has;
+  $('#setsResult').hidden = !has || !state.setPrice;
+}
+
+async function setsOpen(id) {
+  state.setId = id;
+  try {
+    const s = await fetchJSON(`/api/sets/${id}`);
+    $('#setName').value = s.name;
+    $('#setNote').value = s.note || '';
+    state.setLines = (s.lines || []).map((l) => ({
+      item_id: l.item_id, quality: l.quality, qty: l.qty,
+      name: l.name_disp || l.item_id,
+      tier_ench: l.tier ? `Т${l.tier}.${l.enchant}` : '—',
+    }));
+    renderSetLines();
+    $('#setsList').querySelectorAll('.set-item').forEach((el) => {
+      el.classList.toggle('active', Number(el.dataset.id) === id);
+    });
+    setsTogglePanels();
+    await setsPrice();
+  } catch (e) {
+    toast('Не удалось открыть сет: ' + e.message, 'err');
+  }
+}
+
+function renderSetLines() {
+  const t = $('#setLines');
+  if (!state.setLines.length) {
+    t.innerHTML = '<tbody><tr><td class="dimc" style="padding:14px 8px">'
+      + 'Пусто. Найди предмет в поле выше и он появится здесь.</td></tr></tbody>';
+    return;
+  }
+  const qOpts = (sel) => [1, 2, 3, 4, 5].map((q) =>
+    `<option value="${q}"${q === sel ? ' selected' : ''}>${esc(qualityRu(q))}</option>`).join('');
+  t.innerHTML = '<thead><tr><th>Предмет</th><th style="width:88px">Тир</th>'
+    + '<th style="width:170px">Качество</th><th style="width:110px">Кол-во</th><th style="width:40px"></th>'
+    + '</tr></thead><tbody>' + state.setLines.map((l, i) =>
+      `<tr><td>${esc(l.name)}<span class="sub2">${esc(l.item_id)}`
+      + (l.tier_ench === '—' && l.name === l.item_id
+        ? ' <span class="pill spike">нет в каталоге</span>' : '') + '</span></td>'
+      + `<td><span class="pill tier">${esc(l.tier_ench)}</span></td>`
+      + `<td><select class="input" data-q="${i}">${qOpts(l.quality)}</select></td>`
+      + `<td><input type="number" class="input mono" data-n="${i}" min="1" max="10000" value="${l.qty}"></td>`
+      + `<td><button class="del" data-d="${i}" title="Убрать">×</button></td></tr>`
+    ).join('') + '</tbody>';
+  t.querySelectorAll('select[data-q]').forEach((el) => el.addEventListener('change', () => {
+    state.setLines[Number(el.dataset.q)].quality = Number(el.value);
+  }));
+  t.querySelectorAll('input[data-n]').forEach((el) => el.addEventListener('input', () => {
+    state.setLines[Number(el.dataset.n)].qty = Math.max(1, Number(el.value) || 1);
+  }));
+  t.querySelectorAll('button[data-d]').forEach((el) => el.addEventListener('click', () => {
+    state.setLines.splice(Number(el.dataset.d), 1);
+    renderSetLines();
+  }));
+}
+
+async function setsSave(thenPrice) {
+  if (state.setId == null) return;
+  const body = {
+    name: $('#setName').value.trim() || 'Мой сет',
+    note: $('#setNote').value.trim(),
+    lines: state.setLines.map((l) => ({ item_id: l.item_id, quality: l.quality, qty: l.qty })),
+  };
+  try {
+    const r = await fetch(`/api/sets/${state.setId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      let d = 'HTTP ' + r.status;
+      try { d = (await r.json()).detail || d; } catch (e) { /* ignore */ }
+      throw new Error(d);
+    }
+    toast('Сет сохранён', 'ok');
+    await setsLoadList(state.setId);
+    if (thenPrice) await setsPrice();
+  } catch (e) {
+    toast('Не сохранилось: ' + e.message, 'err');
+  }
+}
+
+async function setsPrice() {
+  if (state.setId == null || !state.setLines.length) {
+    state.setPrice = null;
+    setsTogglePanels();
+    return;
+  }
+  $('#loader').hidden = false;
+  try {
+    const subst = $('#setSubst').value === '1';
+    const d = await fetchJSON(`/api/sets/${state.setId}/price?allow_higher_quality=${subst}`, 60000);
+    state.setPrice = d;
+    renderSetPrice(d);
+    setsTogglePanels();
+  } catch (e) {
+    toast('Не удалось посчитать: ' + e.message, 'err');
+  } finally {
+    $('#loader').hidden = true;
+  }
+}
+
+function renderSetPrice(d) {
+  const b = d.best;
+  if (!b) { $('#setsResult').hidden = true; return; }
+
+  $('#setKpis').innerHTML =
+    kpi('Дешевле всего целиком', esc(cityRu(b.city)),
+        b.complete ? 'есть все позиции' : `не хватает ${b.missing}`, b.complete ? 'gold' : 'bad') +
+    kpi('Стоимость сета', fmt(b.total), `позиций ${b.items_priced} из ${d.lines.length}`) +
+    (d.split_total != null
+      ? kpi('Если ездить по городам', fmt(d.split_total),
+            d.one_stop_premium != null
+              ? `одна поездка дороже на ${fmt(d.one_stop_premium)}`
+              : 'не все позиции доступны', 'good')
+      : kpi('Если ездить по городам', '—', 'какой-то позиции нет нигде')) +
+    kpi('Городов с полным сетом', fmt(d.cities.filter((c) => c.complete).length),
+        `из ${d.cities.length}`);
+
+  $('#setNoteLine').innerHTML =
+    'Города, где есть <b>все</b> позиции, идут первыми — город дешевле, но без одной вещи, '
+    + 'означает вторую поездку. Цены — минимальные ордера продажи на момент расчёта'
+    + (d.allow_higher_quality
+      ? '. Если нужного качества нет, подставляется лучшее (помечено «замена»).'
+      : '. Подстановка лучшего качества выключена.');
+
+  $('#setCitiesHead').innerHTML = '<tr><th class="left">Город</th><th>Итого</th>'
+    + '<th>Позиций</th><th class="left">Чего нет</th></tr>';
+  $('#setCitiesBody').innerHTML = d.cities.map((c) => {
+    const cls = [c.city === b.city ? 'best-city' : '', c.complete ? '' : 'incomplete'].filter(Boolean).join(' ');
+    return `<tr class="${cls}"><td class="left"><span class="city">${esc(cityRu(c.city))}</span>`
+      + (c.city === b.city ? '<span class="sub2">дешевле всего целиком</span>' : '') + '</td>'
+      + `<td><span class="num big">${fmt(c.total)}</span></td>`
+      + `<td><span class="num ${c.complete ? 'pos' : 'neg'}">${c.items_priced}/${d.lines.length}</span></td>`
+      + `<td class="left"><span class="dimc" style="font-size:11.5px">`
+      + (c.complete ? '—' : esc(c.missing_items.slice(0, 4).join(', ')
+        + (c.missing_items.length > 4 ? ` и ещё ${c.missing_items.length - 4}` : ''))) + '</span></td></tr>';
+  }).join('');
+
+  $('#setDetailHead').innerHTML = `<tr><th class="left">Что купить в ${esc(cityIn(b.city))}</th>`
+    + '<th>Кач-во</th><th>Шт</th><th>Цена</th><th>Итого</th></tr>';
+  $('#setDetailBody').innerHTML = b.lines.map((e) => {
+    if (!e.available) {
+      const why = e.unknown
+        ? 'такого предмета нет в каталоге — убери строку из сета'
+        : 'нет в продаже в этом городе';
+      return `<tr class="incomplete"><td class="left">${esc(e.name)}`
+        + `<span class="sub2">${esc(e.category_label)}</span></td>`
+        + `<td colspan="4"><span class="neg">${esc(why)}</span></td></tr>`;
+    }
+    return `<tr><td class="left">${esc(e.name)}`
+      + `<span class="sub2"><span class="pill tier">${esc(e.tier_ench)}</span> ${esc(e.category_label)}</span></td>`
+      + `<td><span class="q q${e.quality}"></span>${esc(e.quality_label)}`
+      + (e.substituted
+        ? `<span class="sub2" title="Запрошено «${esc(e.want_quality_label)}», но в продаже только лучше">замена</span>`
+        : '') + '</td>'
+      + `<td><span class="num">${fmt(e.qty)}</span></td>`
+      + `<td><span class="num">${fmt(e.unit_price)}</span></td>`
+      + `<td><span class="num big">${fmt(e.line_total)}</span></td></tr>`;
+  }).join('');
+}
+
+// ---- item search -----------------------------------------------------------
+
+const setsSearch = debounce(async () => {
+  const q = $('#setSearch').value.trim();
+  const cat = $('#setSearchCat').value;
+  const box = $('#setSuggest');
+  if (q.length < 2 && !cat) { box.hidden = true; return; }
+  try {
+    const p = new URLSearchParams({ limit: '25' });
+    if (q) p.set('q', q);
+    if (cat) p.set('category', cat);
+    const d = await fetchJSON(`/api/shop/search?${p}`);
+    if (!d.rows.length) {
+      box.innerHTML = '<div class="state">Ничего не найдено. Попробуй часть названия из игры.</div>';
+    } else {
+      box.innerHTML = d.rows.map((r) =>
+        `<div class="suggest-row" data-id="${esc(r.item_id)}" data-name="${esc(r.name)}"`
+        + ` data-te="${esc(r.tier_ench)}"><span class="pill tier">${esc(r.tier_ench)}</span>`
+        + `<span class="nm">${esc(r.name)}</span>`
+        + `<span class="pill cat">${esc(r.category_label)}</span></div>`).join('');
+      box.querySelectorAll('.suggest-row').forEach((el) => {
+        el.addEventListener('click', () => {
+          const ex = state.setLines.find((l) => l.item_id === el.dataset.id);
+          if (ex) ex.qty += 1;
+          else state.setLines.push({
+            item_id: el.dataset.id, name: el.dataset.name,
+            tier_ench: el.dataset.te, quality: 1, qty: 1,
+          });
+          renderSetLines();
+          $('#setSearch').value = '';
+          box.hidden = true;
+          toast(ex ? `${el.dataset.name}: количество +1` : `Добавлено: ${el.dataset.name}`, 'ok');
+        });
+      });
+    }
+    box.hidden = false;
+  } catch (e) {
+    box.hidden = true;
+  }
+}, 260);
+
+function wireSets() {
+  $('#setSearch').addEventListener('input', setsSearch);
+  $('#setSearchCat').addEventListener('change', setsSearch);
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.sets-add')) $('#setSuggest').hidden = true;
+  });
+  $('#setSubst').addEventListener('change', setsPrice);
+  $('#setSaveBtn').addEventListener('click', () => setsSave(true));
+
+  $('#setNewBtn').addEventListener('click', async () => {
+    try {
+      const r = await fetch('/api/sets', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Новый сет', note: '', lines: [] }),
+      });
+      const s = await r.json();
+      state.setPrice = null;
+      await setsLoadList(s.set_id);
+      $('#setName').focus();
+    } catch (e) {
+      toast('Не удалось создать сет', 'err');
+    }
+  });
+
+  $('#setDelBtn').addEventListener('click', async () => {
+    if (state.setId == null) return;
+    const name = $('#setName').value || 'сет';
+    if (!confirm(`Удалить «${name}»? Отменить будет нельзя.`)) return;
+    try {
+      await fetch(`/api/sets/${state.setId}`, { method: 'DELETE' });
+      state.setId = null;
+      state.setPrice = null;
+      state.setLines = [];
+      await setsLoadList();
+      toast('Сет удалён', 'ok');
+    } catch (e) {
+      toast('Не удалось удалить', 'err');
+    }
+  });
+}
+
 // ---------------------------------------------------------------- status
 
 async function pollStatus() {
@@ -670,6 +1039,13 @@ async function initMeta() {
     QUALITY_RU[q.id] = q.label;          // backend is the source of truth
   }
 
+  // Categories for the set item search come from the shopping catalog, which is
+  // wider than the Black Market one (mounts, potions, food, tools).
+  try {
+    const sc = await fetchJSON('/api/shop/search?limit=1');
+    for (const c of sc.categories || []) opt($('#setSearchCat'), c.id, c.label);
+  } catch (e) { /* the sets tab will still work, just without the filter */ }
+
   // Window buttons come from the server so a new window needs no HTML edit.
   if (!m.windows.some((w) => w.id === state.window)) state.window = m.windows[0].id;
   $('#windowSwitch').innerHTML = m.windows.map((w) =>
@@ -682,8 +1058,22 @@ async function initMeta() {
 
 function syncControls() {
   const v = state.view;
+  const isSets = v === 'sets';
+  // The sets tab has its own layout and its own filters, so the shared control
+  // row and results table step aside entirely rather than showing dead widgets.
+  $('#setsView').hidden = !isSets;
+  $('#tableWrap').hidden = isSets;
+  $('#kpis').hidden = isSets || !$('#kpis').innerHTML;
+  document.querySelector('.controls').hidden = isSets;
+  $('#note').hidden = isSets;
+  if (isSets) {
+    renderRankBar();
+    return;
+  }
   $('#budgetWrap').hidden = v !== 'plan';
   $('#buyCity').hidden = !(v === 'flips' || v === 'plan');
+  $('#rankBtn').hidden = v !== 'flips';
+  renderRankBar();
   const modelUsed = v !== 'stats';
   $('#advBtn').hidden = !modelUsed;
   if (!modelUsed) {
@@ -703,7 +1093,21 @@ function wire() {
     $('#tbody').innerHTML = '';
     $('#kpis').hidden = true;
     syncControls();
-    load();
+    if (state.view === 'sets') setsLoadList(state.setId);
+    else load();
+  });
+
+  $('#rankBtn').addEventListener('click', () => {
+    state.rankMode = !state.rankMode;
+    if (!state.rankMode && state.rank.length) {
+      state.rank = [];             // leaving the mode clears the criteria
+      renderRankBar();
+      if (state.cols) renderHead(state.cols);
+      load();
+      return;
+    }
+    renderRankBar();
+    if (state.cols) renderHead(state.cols);
   });
 
   $('#windowSwitch').addEventListener('click', (e) => {
@@ -767,6 +1171,7 @@ function wire() {
 
 (async function main() {
   wire();
+  wireSets();
   syncControls();
   try { await initMeta(); } catch (e) { toast('Не удалось загрузить справочники: ' + e.message, 'err'); }
   pollStatus();

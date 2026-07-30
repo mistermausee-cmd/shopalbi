@@ -98,6 +98,38 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
+-- Searchable shopping catalog for the "my sets" feature. Much wider than
+-- `items` (mounts, potions, food, tools, gatherer gear) and deliberately has no
+-- prices: quotes for the few items in a set are fetched on demand.
+CREATE TABLE IF NOT EXISTS shop_items (
+    item_id   TEXT PRIMARY KEY,
+    tier      INTEGER NOT NULL,
+    enchant   INTEGER NOT NULL,
+    category  TEXT NOT NULL,
+    name_disp TEXT NOT NULL,
+    name_norm TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_shop_norm ON shop_items(name_norm);
+CREATE INDEX IF NOT EXISTS idx_shop_cat  ON shop_items(category);
+
+CREATE TABLE IF NOT EXISTS gear_sets (
+    set_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gear_set_lines (
+    set_id   INTEGER NOT NULL,
+    line_no  INTEGER NOT NULL,
+    item_id  TEXT NOT NULL,
+    quality  INTEGER NOT NULL DEFAULT 1,
+    qty      INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (set_id, line_no),
+    FOREIGN KEY (set_id) REFERENCES gear_sets(set_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS order_book (
     order_id INTEGER PRIMARY KEY,
     item_id  TEXT NOT NULL,
@@ -229,6 +261,114 @@ class Storage:
             cur.close()
 
     # -- catalog ------------------------------------------------------------
+
+    # -- shopping catalog ---------------------------------------------------
+
+    def replace_shop_items(self, items: list[Item]) -> int:
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM shop_items")
+            cur.executemany(
+                "INSERT INTO shop_items (item_id, tier, enchant, category, name_disp, name_norm) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [(it.item_id, it.tier, it.enchant, it.category, it.display_name(),
+                  (it.display_name() + " " + it.item_id).lower()) for it in items],
+            )
+        return len(items)
+
+    def shop_item_count(self) -> int:
+        with self.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM shop_items")
+            return cur.fetchone()["n"]
+
+    def search_shop_items(self, query: str | None, category: str | None = None,
+                          tier: int | None = None, limit: int = 50) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM shop_items WHERE 1=1"
+        params: dict = {}
+        if query and query.strip():
+            sql += " AND name_norm LIKE :q"
+            params["q"] = f"%{query.strip().lower()}%"
+        if category:
+            sql += " AND category = :cat"
+            params["cat"] = category
+        if tier is not None:
+            sql += " AND tier = :tier"
+            params["tier"] = tier
+        # Shortest name first: searching "суп" should surface "Морковный суп"
+        # ahead of every soup variant that merely contains the word.
+        sql += " ORDER BY LENGTH(name_disp), tier, enchant, item_id LIMIT :lim"
+        params["lim"] = max(1, min(limit, 200))
+        with self.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+
+    def shop_items_by_ids(self, item_ids: list[str]) -> dict[str, sqlite3.Row]:
+        if not item_ids:
+            return {}
+        with self.cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM shop_items WHERE item_id IN ({_placeholders(len(item_ids))})",
+                item_ids)
+            return {r["item_id"]: r for r in cur.fetchall()}
+
+    # -- gear sets ----------------------------------------------------------
+
+    def create_set(self, name: str, note: str = "") -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.cursor() as cur:
+            cur.execute(
+                "INSERT INTO gear_sets (name, note, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (name.strip() or "Без названия", note.strip(), now, now))
+            return cur.lastrowid
+
+    def list_sets(self) -> list[dict]:
+        with self.cursor() as cur:
+            cur.execute(
+                "SELECT s.*, (SELECT COUNT(*) FROM gear_set_lines l WHERE l.set_id=s.set_id) lines "
+                "FROM gear_sets s ORDER BY s.updated_at DESC")
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_set(self, set_id: int) -> dict | None:
+        with self.cursor() as cur:
+            cur.execute("SELECT * FROM gear_sets WHERE set_id=?", (set_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            cur.execute(
+                "SELECT l.*, i.name_disp, i.category, i.tier, i.enchant FROM gear_set_lines l "
+                "LEFT JOIN shop_items i ON i.item_id = l.item_id "
+                "WHERE l.set_id=? ORDER BY l.line_no", (set_id,))
+            return {**dict(row), "lines": [dict(r) for r in cur.fetchall()]}
+
+    def replace_set_lines(self, set_id: int, lines: list[dict]) -> int:
+        """Rewrite a set's contents. Lines are renumbered so ordering is stable."""
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM gear_set_lines WHERE set_id=?", (set_id,))
+            cur.executemany(
+                "INSERT INTO gear_set_lines (set_id, line_no, item_id, quality, qty) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(set_id, i, ln["item_id"], int(ln.get("quality") or 1),
+                  max(1, int(ln.get("qty") or 1))) for i, ln in enumerate(lines)],
+            )
+            cur.execute("UPDATE gear_sets SET updated_at=? WHERE set_id=?",
+                        (datetime.now(timezone.utc).isoformat(), set_id))
+        return len(lines)
+
+    def rename_set(self, set_id: int, name: str, note: str | None = None) -> None:
+        with self.cursor() as cur:
+            if note is None:
+                cur.execute("UPDATE gear_sets SET name=?, updated_at=? WHERE set_id=?",
+                            (name.strip() or "Без названия",
+                             datetime.now(timezone.utc).isoformat(), set_id))
+            else:
+                cur.execute("UPDATE gear_sets SET name=?, note=?, updated_at=? WHERE set_id=?",
+                            (name.strip() or "Без названия", note.strip(),
+                             datetime.now(timezone.utc).isoformat(), set_id))
+
+    def delete_set(self, set_id: int) -> bool:
+        with self.cursor() as cur:
+            cur.execute("DELETE FROM gear_set_lines WHERE set_id=?", (set_id,))
+            cur.execute("DELETE FROM gear_sets WHERE set_id=?", (set_id,))
+            return cur.rowcount > 0
 
     def purge_orphans(self) -> dict[str, int]:
         """Drop rows for item ids that are no longer in the catalog.

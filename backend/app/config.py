@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "5.1.2"
+VERSION = "5.2.0"
 
 
 def _get(name: str, default: str) -> str:

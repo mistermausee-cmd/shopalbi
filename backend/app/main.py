@@ -26,12 +26,14 @@ from logging.handlers import RotatingFileHandler
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel, Field
 
 from . import config, engine
 from .aodp_client import AodpClient
 from .engine import Analytics
 from .nats_consumer import NatsConsumer
 from .scheduler import RefreshManager
+from .shopsets import SetPricer
 from .storage import Storage
 
 # Log to stdout (docker logs) AND to a rotating file, so errors can be
@@ -63,11 +65,12 @@ _storage: Storage | None = None
 _analytics: Analytics | None = None
 _manager: RefreshManager | None = None
 _nats: NatsConsumer | None = None
+_set_pricer: SetPricer | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _storage, _analytics, _manager, _nats
+    global _storage, _analytics, _manager, _nats, _set_pricer
     log.info("shopalbi %s starting (server=%s)", config.VERSION, config.API_HOST)
     _storage = Storage()
     client = AodpClient()
@@ -82,6 +85,13 @@ async def lifespan(app: FastAPI):
     # means the site has real numbers immediately instead of looking empty until
     # the first full refresh finishes a couple of minutes later.
     engine.ensure_derived(_storage)
+    # Wide shopping catalog for the gear-set tab. Names only, no prices:
+    # quotes are fetched on demand for the few items in a set.
+    _set_pricer = SetPricer(_storage, client)
+    try:
+        _set_pricer.ensure_catalog()
+    except Exception:
+        log.exception('shopping catalog build failed; the sets tab will be empty')
     _manager = RefreshManager(_storage, client, _analytics)
     _manager.start()
     if config.NATS_ENABLE:
@@ -202,13 +212,27 @@ def api_flips(
     sort: str = Query("opportunity"),
     direction: str = Query("desc"),
     limit: int = Query(300, ge=1, le=2000),
+    rank: str | None = Query(
+        None,
+        description="Comma-separated criteria to rank by jointly, e.g. "
+                    "'profit_pct,bm_volume,absorb'. Overrides `sort` when present.",
+    ),
     _=Depends(require_auth),
 ):
     _check_window(window)
     _check_mode("buy_mode", buy_mode)
     _check_mode("sell_mode", sell_mode)
     _check_buy_city(buy_city)
+    rank_keys = [k.strip() for k in (rank or "").split(",") if k.strip()]
+    unknown = [k for k in rank_keys if k not in engine.RANK_KEYS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown rank criteria: {', '.join(unknown)}. "
+                   f"Allowed: {', '.join(engine.RANK_KEYS)}",
+        )
     return _an().flips(
+        rank=rank_keys,
         window=window, buy_mode=buy_mode, sell_mode=sell_mode,
         min_profit=min_profit, min_profit_pct=min_profit_pct,
         min_bm_volume=min_bm_volume, gank_rate=gank_rate,
@@ -303,6 +327,117 @@ def api_stats(
         window=window, category=category, tier=tier, enchant=enchant, quality=quality,
         search=search, sort=sort, direction=direction, limit=limit, offset=offset,
     )
+
+
+# -- gear sets --------------------------------------------------------------
+
+
+class SetLine(BaseModel):
+    item_id: str = Field(min_length=1, max_length=120)
+    quality: int = Field(1, ge=1, le=5)
+    qty: int = Field(1, ge=1, le=10000)
+
+
+class SetPayload(BaseModel):
+    name: str = Field("Мой сет", max_length=80)
+    note: str = Field("", max_length=400)
+    lines: list[SetLine] = Field(default_factory=list, max_length=200)
+
+
+def _pricer() -> SetPricer:
+    if _set_pricer is None:
+        raise HTTPException(status_code=503, detail="Service starting up")
+    return _set_pricer
+
+
+def _validated_lines(payload: SetPayload) -> list[dict]:
+    """Reject unknown item ids before storing them.
+
+    Without this a typo is accepted silently and then shows up as "not available
+    in any city", which looks like a market problem rather than a bad id. One
+    lookup for the whole payload, not one per line.
+    """
+    if _storage is None:
+        raise HTTPException(status_code=503, detail="Service starting up")
+    ids = [ln.item_id for ln in payload.lines]
+    if not ids:
+        return []
+    known = _storage.shop_items_by_ids(ids)
+    unknown = sorted({i for i in ids if i not in known})
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"неизвестные предметы: {', '.join(unknown[:6])}"
+                   + (f" (и ещё {len(unknown) - 6})" if len(unknown) > 6 else "")
+                   + ". Ищи их через /api/shop/search",
+        )
+    return [ln.model_dump() for ln in payload.lines]
+
+
+@app.get("/api/shop/search")
+def api_shop_search(
+    q: str | None = None,
+    category: str | None = None,
+    tier: int | None = Query(None, ge=1, le=8),
+    limit: int = Query(40, ge=1, le=200),
+    _=Depends(require_auth),
+):
+    """Search the wide shopping catalog (mounts, potions, food, tools, gear)."""
+    return _pricer().search(q, category, tier, limit)
+
+
+@app.get("/api/sets")
+def api_sets_list(_=Depends(require_auth)):
+    return {"rows": _storage.list_sets() if _storage else []}
+
+
+@app.post("/api/sets")
+def api_sets_create(payload: SetPayload, _=Depends(require_auth)):
+    if _storage is None:
+        raise HTTPException(status_code=503, detail="Service starting up")
+    lines = _validated_lines(payload)
+    set_id = _storage.create_set(payload.name, payload.note)
+    if lines:
+        _storage.replace_set_lines(set_id, lines)
+    return _storage.get_set(set_id)
+
+
+@app.get("/api/sets/{set_id}")
+def api_sets_get(set_id: int, _=Depends(require_auth)):
+    s = _storage.get_set(set_id) if _storage else None
+    if not s:
+        raise HTTPException(status_code=404, detail="set not found")
+    return s
+
+
+@app.put("/api/sets/{set_id}")
+def api_sets_update(set_id: int, payload: SetPayload, _=Depends(require_auth)):
+    if _storage is None or not _storage.get_set(set_id):
+        raise HTTPException(status_code=404, detail="set not found")
+    lines = _validated_lines(payload)
+    _storage.rename_set(set_id, payload.name, payload.note)
+    _storage.replace_set_lines(set_id, lines)
+    return _storage.get_set(set_id)
+
+
+@app.delete("/api/sets/{set_id}")
+def api_sets_delete(set_id: int, _=Depends(require_auth)):
+    if _storage is None or not _storage.delete_set(set_id):
+        raise HTTPException(status_code=404, detail="set not found")
+    return {"status": "deleted", "set_id": set_id}
+
+
+@app.get("/api/sets/{set_id}/price")
+def api_sets_price(
+    set_id: int,
+    allow_higher_quality: bool = Query(True),
+    _=Depends(require_auth),
+):
+    """Cost the set in every city; cities that can supply it whole rank first."""
+    res = _pricer().price_set(set_id, allow_higher_quality=allow_higher_quality)
+    if res is None:
+        raise HTTPException(status_code=404, detail="set not found")
+    return res
 
 
 @app.post("/api/refresh")

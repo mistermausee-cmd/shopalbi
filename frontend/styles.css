@@ -307,3 +307,107 @@ tbody tr:hover td.stick { background: #171a26; }
   .input.grow { flex-basis: 100%; }
   .kpi-val { font-size: 17px; }
 }
+
+
+/* ---------- composite ranking bar ---------- */
+.rankbar {
+  background: rgba(139, 123, 255, .07); border: 1px solid var(--line-soft);
+  border-radius: var(--r); padding: 10px 13px; align-items: center;
+}
+.rank-hint { font-size: 12px; color: var(--dim); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--panel-3); border: 1px solid var(--violet); color: var(--text);
+  padding: 4px 9px; border-radius: 7px; font-size: 12px; font-weight: 600;
+}
+.chip b { color: var(--violet); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+.chip button {
+  background: none; border: none; color: var(--mute); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0; font-family: inherit;
+}
+.chip button:hover { color: var(--red); }
+thead th.ranked { color: var(--violet); background: rgba(139, 123, 255, .12); }
+thead th.rankable { border-bottom: 2px solid transparent; }
+.rank-on thead th.rankable:hover { background: rgba(139, 123, 255, .16); color: var(--violet); }
+
+/* ---------- my sets ---------- */
+.sets { display: grid; grid-template-columns: 258px 1fr; gap: 12px; align-items: start; }
+.sets-side {
+  background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r);
+  overflow: hidden; position: sticky; top: 12px;
+}
+.sets-side-head {
+  display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  padding: 11px 13px; border-bottom: 1px solid var(--line-soft);
+  font-weight: 700; font-size: 13px;
+}
+.btn.small { padding: 5px 10px; font-size: 12px; }
+.sets-list { max-height: 62vh; overflow: auto; }
+.set-item {
+  padding: 10px 13px; border-bottom: 1px solid var(--line-soft); cursor: pointer;
+  transition: background .12s;
+}
+.set-item:hover { background: var(--panel-2); }
+.set-item.active { background: rgba(232, 194, 101, .1); box-shadow: inset 3px 0 0 var(--gold); }
+.set-item-name { font-weight: 600; font-size: 13px; }
+.set-item-sub { font-size: 11px; color: var(--mute); margin-top: 2px; }
+.sets-list .state { padding: 22px 14px; font-size: 12.5px; }
+
+.sets-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.sets-empty {
+  background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r);
+  padding: 44px 28px; text-align: center; color: var(--dim); line-height: 1.75;
+}
+.sets-empty b { color: var(--gold); }
+.sets-editor {
+  background: var(--panel); border: 1px solid var(--line-soft); border-radius: var(--r);
+  padding: 14px; display: flex; flex-direction: column; gap: 12px;
+}
+.sets-add { position: relative; display: flex; gap: 9px; align-items: flex-end; }
+.suggest {
+  position: absolute; top: 100%; left: 0; right: 0; z-index: 20; margin-top: 4px;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow); max-height: 320px; overflow: auto;
+}
+.suggest-row {
+  display: flex; align-items: center; gap: 9px; padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+}
+.suggest-row:last-child { border-bottom: none; }
+.suggest-row:hover, .suggest-row.sel { background: var(--panel-3); }
+.suggest-row .nm { flex: 1; font-size: 13px; }
+.suggest .state { padding: 16px; font-size: 12.5px; }
+
+table.sets-lines { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.sets-lines th {
+  text-align: left; color: var(--mute); font-size: 11px; font-weight: 600;
+  padding: 6px 8px; border-bottom: 1px solid var(--line-soft);
+}
+/* The global table rule right-aligns every cell (good for money columns, wrong
+   for this editor), so alignment is restored explicitly here. */
+table.sets-lines td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); text-align: left; }
+table.sets-lines td:last-child { text-align: right; }
+table.sets-lines .sub2 { font-family: 'JetBrains Mono', monospace; }
+table.sets-lines tr:last-child td { border-bottom: none; }
+table.sets-lines .input { height: 32px; }
+table.sets-lines .del {
+  background: none; border: none; color: var(--mute); cursor: pointer; font-size: 15px;
+}
+table.sets-lines .del:hover { color: var(--red); }
+
+/* Side by side only when there is genuinely room for both: the detail table has
+   five columns and gets unreadable below ~1400px, so it stacks instead of
+   forcing a horizontal scrollbar on a normal laptop. */
+.sets-grid { display: grid; grid-template-columns: 1fr; gap: 12px; align-items: start; }
+@media (min-width: 1400px) {
+  .sets-grid { grid-template-columns: minmax(320px, 420px) 1fr; }
+}
+.sets-cities, .sets-detail { max-height: 60vh; }
+tbody tr.best-city td { background: rgba(62, 209, 127, .09); }
+tbody tr.incomplete td { opacity: .62; }
+
+@media (max-width: 1100px) {
+  .sets { grid-template-columns: 1fr; }
+  .sets-side { position: static; }
+}

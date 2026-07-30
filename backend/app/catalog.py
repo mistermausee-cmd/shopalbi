@@ -158,6 +158,110 @@ def build_items(force: bool = False) -> list[Item]:
     return items
 
 
+# --------------------------------------------------------------------------
+# Shopping catalog (for the "my sets" feature)
+# --------------------------------------------------------------------------
+#
+# A deliberately WIDER universe than the Black Market one: a gear set you run
+# with includes mounts, potions, food, a fishing rod and gatherer clothing —
+# none of which the Black Market buys, so none of which appear in `build_items`.
+#
+# Prices are NOT pre-fetched for this catalog. It exists to be searched; the
+# quotes for the handful of items in an actual set are fetched on demand, which
+# keeps the API budget flat no matter how large the catalog is.
+_SHOP_SLOTS = {
+    "MOUNT": "mount",
+    "POTION": "potion",
+    "MEAL": "food",
+    "BACKPACK": "bag",
+    "BAG": "bag",
+    "CAPE": "cape",
+    "CAPEITEM": "cape",
+    "MAIN": "weapon",
+    "2H": "weapon",
+    "OFF": "offhand",
+    "HEAD": "armor",
+    "ARMOR": "armor",
+    "SHOES": "armor",
+    "FURNITUREITEM": "misc",
+    "JOURNAL": "misc",
+}
+SHOP_CATEGORY_NAMES = {
+    "mount": "Маунты",
+    "potion": "Зелья",
+    "food": "Еда",
+    "bag": "Сумки и рюкзаки",
+    "cape": "Плащи",
+    "weapon": "Оружие",
+    "offhand": "Оффхенд",
+    "armor": "Броня",
+    "tool": "Инструменты",
+    "gatherer": "Снаряжение собирателя",
+    "misc": "Прочее",
+}
+# Never offer these: they cannot be bought on a marketplace at all.
+_SHOP_EXCLUDE = ("NONTRADABLE", "_DEBUG", "TUTORIAL", "TRASH", "QUESTITEM",
+                 "_TEST", "GVGSEASONREWARD", "LOOTBAG", "SILVERBAG", "LOOTCHEST")
+
+
+def _shop_category(unique_name: str, slot: str) -> str:
+    upper = unique_name.upper()
+    if "_GATHERER_" in upper:
+        return "gatherer"
+    if "_TOOL" in upper:
+        return "tool"
+    return _SHOP_SLOTS[slot]
+
+
+def build_shop_items(force: bool = False) -> list[Item]:
+    """Everything a player might shop for, tiers 1-8 plus tradable unique mounts."""
+    raw = load_raw_catalog(force=force)
+    out: list[Item] = []
+    seen: set[str] = set()
+    for entry in raw:
+        uid = entry.get("UniqueName") or ""
+        if not uid or uid in seen:
+            continue
+        upper = uid.upper()
+        if any(tok in upper for tok in _SHOP_EXCLUDE):
+            continue
+        names = entry.get("LocalizedNames") or {}
+        name_ru = names.get(config.PRIMARY_LANG) or ""
+        name_en = names.get(config.FALLBACK_LANG) or ""
+        if not name_ru and not name_en:
+            continue
+
+        m_tier = _TIER_RE.match(uid)
+        parts = uid.split("@", 1)[0].split("_")
+        if m_tier:
+            slot = parts[1] if len(parts) > 1 else ""
+            if slot not in _SHOP_SLOTS:
+                continue
+            tier = int(m_tier.group(1))
+            category = _shop_category(uid, slot)
+        elif upper.startswith("UNIQUE_MOUNT_"):
+            # Vanity/event mounts are tradable and people do buy them.
+            slot, tier, category = "MOUNT", 0, "mount"
+        else:
+            continue
+
+        m_ench = _ENCHANT_RE.search(uid)
+        seen.add(uid)
+        out.append(
+            Item(
+                item_id=uid,
+                base_id=uid.split("@", 1)[0],
+                tier=tier,
+                enchant=int(m_ench.group(1)) if m_ench else 0,
+                slot=slot,
+                category=category,
+                name_ru=name_ru,
+                name_en=name_en,
+            )
+        )
+    return out
+
+
 if __name__ == "__main__":
     its = build_items()
     print(f"Black-Market-eligible items (T{min(config.TIERS)}-T{max(config.TIERS)}): {len(its)}")

@@ -170,6 +170,97 @@ def city_gank_rate(city: str, base: float) -> float:
     return _clamp(base * config.CITY_RISK_MULTIPLIER.get(city, 1.0), 0.0, 0.95)
 
 
+# --------------------------------------------------------------------------
+# composite ranking
+# --------------------------------------------------------------------------
+#
+# Sorting by one column answers "what is the biggest X". Picking a position to
+# actually trade usually means several things at once — a good margin AND real
+# turnover AND a short sell-through. RANK_KEYS declares, for each criterion, how
+# to read it and which direction is "better"; `composite_rank` then scores rows
+# on the combination.
+#
+# Percentile rank, not min-max: these distributions are extremely skewed (a
+# single 500k-profit outlier next to thousands of 2k rows), and min-max
+# normalisation would collapse everything except the outlier to ~0.
+RANK_KEYS: dict[str, tuple[str, bool]] = {
+    # key                (field,               higher_is_better)
+    "profit":            ("profit",            True),
+    "profit_pct":        ("profit_pct",        True),
+    "ev_unit":           ("ev_unit",           True),
+    "ev_pct":            ("ev_pct",            True),
+    "opportunity":       ("opportunity",       True),
+    "throughput":        ("throughput",        True),
+    "reliability":       ("reliability",       True),
+    "bm_volume":         ("bm_daily_volume",   True),
+    "available":         ("available",         True),
+    "profit_vwap":       ("profit_vwap",       True),
+    "bm_trend":          ("bm_trend_pct",      True),
+    "absorb":            ("est_absorb_h",      False),   # sooner is better
+    "buy_price":         ("buy_price",         False),   # cheaper is better
+}
+
+
+def _percentiles(values: list[float], higher_is_better: bool) -> list[float]:
+    """Percentile position of each value in 0..1, ties sharing the average rank."""
+    n = len(values)
+    if n <= 1:
+        return [1.0] * n
+    # Best first, so the leading block gets the 1.0 end of the scale: descending
+    # when a bigger number is better, ascending when a smaller one is.
+    order = sorted(range(n), key=lambda i: values[i], reverse=higher_is_better)
+    out = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        # average rank for the tied block, mapped so that "best" -> 1.0
+        avg_rank = (i + j) / 2.0
+        score = 1.0 - avg_rank / (n - 1)
+        for k in range(i, j + 1):
+            out[order[k]] = score
+        i = j + 1
+    return out
+
+
+def composite_rank(rows: list[dict], keys: list[str]) -> list[str]:
+    """Annotate rows with `rank_score` (0..100) over the chosen criteria.
+
+    Missing values (a None sell-through, unknown live depth) get the worst
+    percentile for that criterion rather than being dropped, so a row is never
+    promoted just because we know less about it.
+
+    Returns the criteria actually used.
+    """
+    used = [k for k in keys if k in RANK_KEYS]
+    if not rows or not used:
+        for r in rows:
+            r.pop("rank_score", None)
+            r.pop("rank_parts", None)
+        return []
+
+    per_key: dict[str, list[float]] = {}
+    for k in used:
+        field, higher = RANK_KEYS[k]
+        raw = [r.get(field) for r in rows]
+        worst = min((v for v in raw if v is not None), default=0.0) if higher else \
+            max((v for v in raw if v is not None), default=0.0)
+        vals = [float(worst if v is None else v) for v in raw]
+        per_key[k] = _percentiles(vals, higher)
+
+    for i, r in enumerate(rows):
+        r["rank_parts"] = {k: round(per_key[k][i] * 100) for k in used}
+        # Two scores: the exact mean drives the ordering, the rounded one is what
+        # gets displayed. Sorting on the rounded value would leave every row
+        # inside a shared integer score in arbitrary order — with a few thousand
+        # candidates that is ~20 rows per point, enough to look broken.
+        exact = sum(per_key[k][i] for k in used) / len(used)
+        r["rank_exact"] = round(exact * 100, 4)
+        r["rank_score"] = round(exact * 100)
+    return used
+
+
 def _sort_and_slice(rows: list[dict], sort: str, direction: str, keys: dict, limit: int) -> list[dict]:
     keyfn = keys.get(sort) or keys[next(iter(keys))]
     rows.sort(key=keyfn, reverse=(direction != "asc"))
@@ -551,6 +642,7 @@ class Analytics:
         sort: str = "opportunity",
         direction: str = "desc",
         limit: int = 300,
+        rank: list[str] | None = None,
     ) -> dict:
         buy_mode = buy_mode or config.DEFAULT_BUY_MODE
         sell_mode = sell_mode or config.DEFAULT_SELL_MODE
@@ -597,7 +689,15 @@ class Analytics:
             rows = self._merge_identical_qualities(rows)
 
         total = len(rows)
-        page = _sort_and_slice(rows, sort, direction, self._FLIP_KEYS, limit)
+        # Composite ranking is applied to the FULL candidate set before paging, so
+        # the top of the list is the best combination overall — not just the best
+        # combination among whatever a single-column sort happened to surface.
+        used_rank = composite_rank(rows, rank or [])
+        if used_rank:
+            rows.sort(key=lambda r: r["rank_exact"], reverse=(direction != "asc"))
+            page = rows[:limit] if limit else rows
+        else:
+            page = _sort_and_slice(rows, sort, direction, self._FLIP_KEYS, limit)
         return {
             "window": window,
             "window_days": config.STAT_WINDOWS.get(window, 7),
@@ -615,6 +715,8 @@ class Analytics:
             "buy_city": buy_city,
             "sort": sort,
             "direction": direction,
+            "rank": used_rank,
+            "rank_available": list(RANK_KEYS),
             "total": total,
             "rows": page,
         }

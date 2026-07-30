@@ -39,6 +39,7 @@
     <button class="tab" data-view="plan"   role="tab">🧮 План закупки</button>
     <button class="tab" data-view="cities" role="tab">🏙 Города закупки</button>
     <button class="tab" data-view="stats"  role="tab">📊 Средние цены</button>
+    <button class="tab" data-view="sets"   role="tab">🎒 Мои сеты</button>
   </nav>
 
   <section class="controls">
@@ -59,8 +60,14 @@
       <select id="enchant" class="input"><option value="">Любое зач.</option></select>
       <select id="quality" class="input"><option value="">Любое кач-во</option></select>
 
+      <button class="btn ghost" id="rankBtn" title="Отбор по нескольким показателям сразу">⚖ Отбор</button>
       <button class="btn ghost" id="advBtn" title="Тонкая настройка модели">⚙ Модель</button>
       <button class="btn ghost" id="csvBtn" title="Скачать текущую таблицу в CSV">⤓ CSV</button>
+    </div>
+
+    <div class="ctl-row rankbar" id="rankBar" hidden>
+      <span class="rank-hint" id="rankHint">Кликай по заголовкам столбцов — они складываются в общий отбор. Клик по тому же столбцу снимает его.</span>
+      <div class="chips" id="rankChips"></div>
     </div>
 
     <div class="ctl-row adv" id="advRow" hidden>
@@ -106,6 +113,72 @@
 
   <section class="kpis" id="kpis" hidden></section>
   <section class="note" id="note"></section>
+
+  <!-- ================= вкладка «Мои сеты» ================= -->
+  <section class="sets" id="setsView" hidden>
+    <aside class="sets-side">
+      <div class="sets-side-head">
+        <span>Мои сеты</span>
+        <button class="btn ghost small" id="setNewBtn" title="Создать новый сет">+ Новый</button>
+      </div>
+      <div class="sets-list" id="setsList"></div>
+    </aside>
+
+    <div class="sets-main">
+      <div class="sets-empty" id="setsEmpty">
+        Слева создай сет и добавь в него предметы, с которыми бегаешь — оружие, броню,
+        маунта, зелья, еду, удочку.<br>Инструмент посчитает, в каком городе можно купить
+        <b>всё сразу</b> и дешевле всего.
+      </div>
+
+      <div class="sets-editor" id="setsEditor" hidden>
+        <div class="ctl-row">
+          <label class="fld grow">
+            <span>Название сета</span>
+            <input type="text" id="setName" class="input" placeholder="например: Рыбак Т5" maxlength="80" />
+          </label>
+          <label class="fld grow">
+            <span>Заметка (необязательно)</span>
+            <input type="text" id="setNote" class="input" placeholder="для чего этот сет" maxlength="400" />
+          </label>
+          <label class="fld">
+            <span>Качество отсутствует</span>
+            <select id="setSubst" class="input" title="Что делать, если нужного качества нет в продаже">
+              <option value="1">Брать лучшее качество</option>
+              <option value="0">Считать позицию отсутствующей</option>
+            </select>
+          </label>
+          <button class="btn" id="setSaveBtn">💾 Сохранить и посчитать</button>
+          <button class="btn ghost" id="setDelBtn">🗑 Удалить</button>
+        </div>
+
+        <div class="sets-add">
+          <label class="fld grow">
+            <span>Добавить предмет — начни печатать название</span>
+            <input type="search" id="setSearch" class="input" autocomplete="off"
+                   placeholder="удочка, эликсир здоровья, ездовая лошадь, шапка рыбака…" />
+          </label>
+          <select id="setSearchCat" class="input"><option value="">Все категории</option></select>
+          <div class="suggest" id="setSuggest" hidden></div>
+        </div>
+
+        <table class="sets-lines" id="setLines"></table>
+      </div>
+
+      <div class="sets-result" id="setsResult" hidden>
+        <div class="kpis" id="setKpis"></div>
+        <div class="note" id="setNoteLine"></div>
+        <div class="sets-grid">
+          <div class="table-wrap sets-cities">
+            <table><thead id="setCitiesHead"></thead><tbody id="setCitiesBody"></tbody></table>
+          </div>
+          <div class="table-wrap sets-detail">
+            <table><thead id="setDetailHead"></thead><tbody id="setDetailBody"></tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <main class="table-wrap" id="tableWrap">
     <table id="dataTable">
