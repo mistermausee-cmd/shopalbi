@@ -4292,3 +4292,269 @@
 2026-07-30 00:14:01,634 INFO shopalbi.engine: current prices stored: 256080 rows in 16.3s
 2026-07-30 00:14:01,675 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:18:45 UTC)" executed successfully
 2026-07-30 00:14:06,322 INFO uvicorn.access: 85.164.244.215:50538 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:14:26,342 INFO uvicorn.access: 85.164.244.215:49222 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:14:52,037 INFO uvicorn.access: 127.0.0.1:56896 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:15:14,420 INFO uvicorn.access: 85.164.244.215:54139 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:15:52,225 INFO uvicorn.access: 127.0.0.1:33424 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:16:14,322 INFO uvicorn.access: 85.164.244.215:58191 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:16:52,415 INFO uvicorn.access: 127.0.0.1:51788 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:17:14,337 INFO uvicorn.access: 85.164.244.215:56624 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:17:33,526 INFO uvicorn.access: 85.164.244.215:56672 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:17:36,773 INFO uvicorn.access: 85.164.244.215:56672 - "GET /api/plan?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:17:38,600 INFO uvicorn.access: 85.164.244.215:56672 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:17:41,468 INFO uvicorn.access: 85.164.244.215:56672 - "GET /api/plan?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:17:44,716 INFO uvicorn.access: 85.164.244.215:56672 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:17:46,059 INFO uvicorn.access: 85.164.244.215:56672 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:17:52,603 INFO uvicorn.access: 127.0.0.1:33482 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:18:06,097 INFO uvicorn.access: 85.164.244.215:57227 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:18:26,094 INFO uvicorn.access: 85.164.244.215:61846 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:18:40,244 INFO uvicorn.access: 205.210.31.131:64746 - "GET /metrics HTTP/1.1" 404
+2026-07-30 00:18:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:23:45 UTC)" (scheduled at 2026-07-30 00:18:45.375972+00:00)
+2026-07-30 00:18:45,381 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:18:46,339 INFO uvicorn.access: 85.164.244.215:58587 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:18:52,793 INFO uvicorn.access: 127.0.0.1:41076 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:19:01,801 INFO shopalbi.storage: bm_offer rebuilt: 28784 rows (max age 3.0 h)
+2026-07-30 00:19:01,802 INFO shopalbi.engine: current prices stored: 256080 rows in 16.4s
+2026-07-30 00:19:01,850 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:23:45 UTC)" executed successfully
+2026-07-30 00:19:06,331 INFO uvicorn.access: 85.164.244.215:62368 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:19:26,334 INFO uvicorn.access: 85.164.244.215:55326 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:19:52,982 INFO uvicorn.access: 127.0.0.1:56734 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:20:14,331 INFO uvicorn.access: 85.164.244.215:63561 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:20:53,169 INFO uvicorn.access: 127.0.0.1:46892 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:21:14,341 INFO uvicorn.access: 85.164.244.215:53598 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:21:53,357 INFO uvicorn.access: 127.0.0.1:48946 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:22:14,348 INFO uvicorn.access: 85.164.244.215:52060 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:22:53,545 INFO uvicorn.access: 127.0.0.1:56456 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:23:14,339 INFO uvicorn.access: 85.164.244.215:62404 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:23:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:28:45 UTC)" (scheduled at 2026-07-30 00:23:45.375972+00:00)
+2026-07-30 00:23:45,381 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:23:48,366 INFO shopalbi.nats: order feed: 41866 seen, 27618 relevant, 13848 stored
+2026-07-30 00:23:53,734 INFO uvicorn.access: 127.0.0.1:49142 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:24:01,733 INFO shopalbi.storage: bm_offer rebuilt: 28243 rows (max age 3.0 h)
+2026-07-30 00:24:01,734 INFO shopalbi.engine: current prices stored: 256080 rows in 16.4s
+2026-07-30 00:24:01,777 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:28:45 UTC)" executed successfully
+2026-07-30 00:24:14,342 INFO uvicorn.access: 85.164.244.215:52769 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:24:53,921 INFO uvicorn.access: 127.0.0.1:34886 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:25:14,349 INFO uvicorn.access: 85.164.244.215:54047 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:25:54,110 INFO uvicorn.access: 127.0.0.1:35026 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:26:14,334 INFO uvicorn.access: 85.164.244.215:54691 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:26:54,299 INFO uvicorn.access: 127.0.0.1:43340 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:27:14,343 INFO uvicorn.access: 85.164.244.215:56241 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:27:54,486 INFO uvicorn.access: 127.0.0.1:55600 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:28:14,357 INFO uvicorn.access: 85.164.244.215:55865 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:28:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:33:45 UTC)" (scheduled at 2026-07-30 00:28:45.375972+00:00)
+2026-07-30 00:28:45,380 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:28:54,673 INFO uvicorn.access: 127.0.0.1:50358 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:29:01,648 INFO shopalbi.storage: bm_offer rebuilt: 28237 rows (max age 3.0 h)
+2026-07-30 00:29:01,648 INFO shopalbi.engine: current prices stored: 256080 rows in 16.3s
+2026-07-30 00:29:01,690 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:33:45 UTC)" executed successfully
+2026-07-30 00:29:14,339 INFO uvicorn.access: 85.164.244.215:57975 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:29:54,859 INFO uvicorn.access: 127.0.0.1:56504 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:30:14,458 INFO uvicorn.access: 85.164.244.215:51580 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:30:55,047 INFO uvicorn.access: 127.0.0.1:46110 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:31:14,363 INFO uvicorn.access: 85.164.244.215:58075 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:31:55,235 INFO uvicorn.access: 127.0.0.1:52008 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:32:14,354 INFO uvicorn.access: 85.164.244.215:51891 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:32:55,423 INFO uvicorn.access: 127.0.0.1:45844 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:33:14,351 INFO uvicorn.access: 85.164.244.215:62997 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:33:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:38:45 UTC)" (scheduled at 2026-07-30 00:33:45.375972+00:00)
+2026-07-30 00:33:45,380 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:33:48,396 INFO shopalbi.nats: order feed: 71868 seen, 46256 relevant, 23206 stored
+2026-07-30 00:33:55,616 INFO uvicorn.access: 127.0.0.1:46324 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:34:01,879 INFO shopalbi.storage: bm_offer rebuilt: 28051 rows (max age 3.0 h)
+2026-07-30 00:34:01,881 INFO shopalbi.engine: current prices stored: 256080 rows in 16.5s
+2026-07-30 00:34:01,921 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:38:45 UTC)" executed successfully
+2026-07-30 00:34:14,416 INFO uvicorn.access: 85.164.244.215:54879 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:34:55,804 INFO uvicorn.access: 127.0.0.1:39312 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:35:14,357 INFO uvicorn.access: 85.164.244.215:51296 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:35:55,992 INFO uvicorn.access: 127.0.0.1:48118 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:36:14,365 INFO uvicorn.access: 85.164.244.215:51277 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:36:56,179 INFO uvicorn.access: 127.0.0.1:50866 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:37:14,430 INFO uvicorn.access: 85.164.244.215:61560 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:37:56,368 INFO uvicorn.access: 127.0.0.1:51566 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:38:14,379 INFO uvicorn.access: 85.164.244.215:49841 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:38:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:43:45 UTC)" (scheduled at 2026-07-30 00:38:45.375972+00:00)
+2026-07-30 00:38:45,380 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:38:56,559 INFO uvicorn.access: 127.0.0.1:36976 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:39:01,651 INFO shopalbi.storage: bm_offer rebuilt: 27748 rows (max age 3.0 h)
+2026-07-30 00:39:01,651 INFO shopalbi.engine: current prices stored: 256080 rows in 16.3s
+2026-07-30 00:39:01,691 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:43:45 UTC)" executed successfully
+2026-07-30 00:39:14,350 INFO uvicorn.access: 85.164.244.215:57750 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:39:56,747 INFO uvicorn.access: 127.0.0.1:41818 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:39:59,036 INFO uvicorn.access: 85.164.244.215:61441 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:40:01,802 INFO uvicorn.access: 85.164.244.215:61441 - "GET / HTTP/1.1" 200
+2026-07-30 00:40:01,878 INFO uvicorn.access: 85.164.244.215:61441 - "GET /styles.css?v=5.1.0 HTTP/1.1" 200
+2026-07-30 00:40:01,904 INFO uvicorn.access: 85.164.244.215:63684 - "GET /app.js?v=5.1.0 HTTP/1.1" 200
+2026-07-30 00:40:01,994 INFO uvicorn.access: 85.164.244.215:63684 - "GET /api/meta HTTP/1.1" 200
+2026-07-30 00:40:02,332 INFO uvicorn.access: 85.164.244.215:63684 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:40:03,120 INFO uvicorn.access: 85.164.244.215:61441 - "GET /api/flips?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&limit=400&sort=opportunity&direction=desc HTTP/1.1" 200
+2026-07-30 00:40:23,717 INFO uvicorn.access: 85.164.244.215:58306 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:40:43,576 INFO uvicorn.access: 85.164.244.215:62564 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:40:56,934 INFO uvicorn.access: 127.0.0.1:44628 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:41:03,580 INFO uvicorn.access: 85.164.244.215:62707 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:41:24,372 INFO uvicorn.access: 85.164.244.215:49671 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:41:44,357 INFO uvicorn.access: 85.164.244.215:53730 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:41:57,123 INFO uvicorn.access: 127.0.0.1:40042 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:42:04,366 INFO uvicorn.access: 85.164.244.215:53966 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:42:24,359 INFO uvicorn.access: 85.164.244.215:52451 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:42:46,680 INFO uvicorn.access: 4.172.78.81:56045 - "GET / HTTP/1.0" 200
+2026-07-30 00:42:46,915 WARNING uvicorn.error: Invalid HTTP request received.
+2026-07-30 00:42:47,136 INFO uvicorn.access: 4.172.78.81:56065 - "GET /nice%20ports%2C/Trinity.txt.bak HTTP/1.0" 404
+2026-07-30 00:42:57,311 INFO uvicorn.access: 127.0.0.1:49246 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:43:14,373 INFO uvicorn.access: 85.164.244.215:55792 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:43:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:48:45 UTC)" (scheduled at 2026-07-30 00:43:45.375972+00:00)
+2026-07-30 00:43:45,381 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:43:50,002 INFO shopalbi.nats: order feed: 87256 seen, 54390 relevant, 27304 stored
+2026-07-30 00:43:57,497 INFO uvicorn.access: 127.0.0.1:34866 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:44:01,612 INFO shopalbi.storage: bm_offer rebuilt: 27756 rows (max age 3.0 h)
+2026-07-30 00:44:01,613 INFO shopalbi.engine: current prices stored: 256080 rows in 16.2s
+2026-07-30 00:44:01,656 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:48:45 UTC)" executed successfully
+2026-07-30 00:44:14,374 INFO uvicorn.access: 85.164.244.215:49171 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:44:57,686 INFO uvicorn.access: 127.0.0.1:39124 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:45:14,410 INFO uvicorn.access: 85.164.244.215:59892 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:45:41,949 INFO uvicorn.access: 147.185.132.45:60438 - "GET / HTTP/1.1" 200
+2026-07-30 00:45:57,876 INFO uvicorn.access: 127.0.0.1:45148 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:46:14,388 INFO uvicorn.access: 85.164.244.215:50210 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:46:58,065 INFO uvicorn.access: 127.0.0.1:42660 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:47:14,391 INFO uvicorn.access: 85.164.244.215:60942 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:47:58,253 INFO uvicorn.access: 127.0.0.1:45074 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:48:14,430 INFO uvicorn.access: 85.164.244.215:55125 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:48:45,376 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:53:45 UTC)" (scheduled at 2026-07-30 00:48:45.375972+00:00)
+2026-07-30 00:48:45,381 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:48:58,442 INFO uvicorn.access: 127.0.0.1:36622 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:49:01,958 INFO shopalbi.storage: bm_offer rebuilt: 27757 rows (max age 3.0 h)
+2026-07-30 00:49:01,958 INFO shopalbi.engine: current prices stored: 256080 rows in 16.6s
+2026-07-30 00:49:02,000 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:53:45 UTC)" executed successfully
+2026-07-30 00:49:14,388 INFO uvicorn.access: 85.164.244.215:53793 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:49:58,627 INFO uvicorn.access: 127.0.0.1:53678 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:50:14,376 INFO uvicorn.access: 85.164.244.215:61234 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:50:58,815 INFO uvicorn.access: 127.0.0.1:34648 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:51:14,407 INFO uvicorn.access: 85.164.244.215:51720 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:51:29,426 INFO uvicorn.error: Shutting down
+2026-07-30 00:51:29,526 INFO uvicorn.error: Waiting for application shutdown.
+2026-07-30 00:51:29,526 INFO apscheduler.scheduler: Scheduler has been shut down
+2026-07-30 00:51:29,527 INFO uvicorn.error: Application shutdown complete.
+2026-07-30 00:51:29,527 INFO uvicorn.error: Finished server process [1]
+2026-07-30 00:51:30,652 INFO uvicorn.error: Started server process [1]
+2026-07-30 00:51:30,652 INFO uvicorn.error: Waiting for application startup.
+2026-07-30 00:51:30,652 INFO shopalbi: shopalbi 5.1.0 starting (server=https://europe.albion-online-data.com)
+2026-07-30 00:51:32,381 INFO shopalbi.storage: purged rows for items no longer in the catalog: {'current_prices': 18000, 'history': 22818, 'agg': 3829}
+2026-07-30 00:51:32,382 INFO apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-30 00:51:32,382 INFO apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-30 00:51:32,382 INFO apscheduler.scheduler: Added job "RefreshManager.job_current" to job store "default"
+2026-07-30 00:51:32,382 INFO apscheduler.scheduler: Added job "RefreshManager.job_history" to job store "default"
+2026-07-30 00:51:32,382 INFO apscheduler.scheduler: Scheduler started
+2026-07-30 00:51:32,383 INFO shopalbi.scheduler: scheduler started: current every 5 min, history every 4 h
+2026-07-30 00:51:32,387 INFO shopalbi.nats: NATS consumer started (topics=marketorders.deduped,marketorders.deduped.bulk)
+2026-07-30 00:51:32,387 INFO shopalbi: kicking off initial data refresh
+2026-07-30 00:51:32,388 INFO uvicorn.error: Application startup complete.
+2026-07-30 00:51:32,388 INFO uvicorn.error: Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2026-07-30 00:51:32,397 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:51:32,527 INFO shopalbi.nats: connected to NATS feed nats.albion-online-data.com:34222
+2026-07-30 00:51:32,527 INFO shopalbi.nats: subscribed to marketorders.deduped
+2026-07-30 00:51:32,527 INFO shopalbi.nats: subscribed to marketorders.deduped.bulk
+2026-07-30 00:51:35,195 INFO uvicorn.access: 127.0.0.1:60480 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:51:48,598 INFO shopalbi.storage: bm_offer rebuilt: 27728 rows (max age 3.0 h)
+2026-07-30 00:51:48,600 INFO shopalbi.engine: current prices stored: 256080 rows in 16.2s
+2026-07-30 00:51:48,648 INFO shopalbi.engine: refreshing 90-day history for 6402 items
+2026-07-30 00:51:49,153 INFO uvicorn.access: 85.164.244.215:54329 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:51:54,913 INFO uvicorn.access: 85.164.244.215:53359 - "GET / HTTP/1.1" 200
+2026-07-30 00:51:55,032 INFO uvicorn.access: 85.164.244.215:53359 - "GET /styles.css?v=5.1.0 HTTP/1.1" 200
+2026-07-30 00:51:55,064 INFO uvicorn.access: 85.164.244.215:63736 - "GET /app.js?v=5.1.0 HTTP/1.1" 200
+2026-07-30 00:51:55,156 INFO uvicorn.access: 85.164.244.215:63736 - "GET /api/meta HTTP/1.1" 200
+2026-07-30 00:51:55,530 INFO uvicorn.access: 85.164.244.215:63736 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:51:56,381 INFO uvicorn.access: 85.164.244.215:53359 - "GET /api/flips?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&limit=400&sort=opportunity&direction=desc HTTP/1.1" 200
+2026-07-30 00:52:00,019 INFO uvicorn.access: 172.18.0.1:49848 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:52:16,871 INFO uvicorn.access: 85.164.244.215:57582 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:52:35,381 INFO uvicorn.access: 127.0.0.1:44430 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:52:36,878 INFO uvicorn.access: 85.164.244.215:61636 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:52:56,871 INFO uvicorn.access: 85.164.244.215:51227 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:53:08,805 INFO shopalbi.storage: aggregates rebuilt: {'day': 3463, '3d': 9946, 'week': 20380, 'month': 57805, 'quarter': 102257}
+2026-07-30 00:53:09,835 INFO shopalbi.engine: history stored: 3331526 buckets in 81.2s
+2026-07-30 00:53:13,720 INFO uvicorn.access: 85.164.244.215:63294 - "POST /api/refresh HTTP/1.1" 200
+2026-07-30 00:53:13,723 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:53:16,852 INFO uvicorn.access: 85.164.244.215:63294 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:53:17,204 INFO uvicorn.access: 85.164.244.215:63294 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:53:30,269 INFO shopalbi.storage: bm_offer rebuilt: 27728 rows (max age 3.0 h)
+2026-07-30 00:53:30,271 INFO shopalbi.engine: current prices stored: 256080 rows in 16.5s
+2026-07-30 00:53:30,315 INFO shopalbi.engine: refreshing 90-day history for 6402 items
+2026-07-30 00:53:35,570 INFO uvicorn.access: 127.0.0.1:44634 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:53:37,348 INFO uvicorn.access: 85.164.244.215:56399 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:53:45,458 INFO uvicorn.access: 85.164.244.215:56957 - "GET /api/flips?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&limit=400&sort=opportunity&direction=desc HTTP/1.1" 200
+2026-07-30 00:53:57,407 INFO uvicorn.access: 85.164.244.215:50408 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:54:17,423 INFO uvicorn.access: 85.164.244.215:57509 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:54:35,766 INFO uvicorn.access: 127.0.0.1:46196 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:54:37,482 INFO uvicorn.access: 85.164.244.215:51230 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:54:51,609 INFO shopalbi.storage: aggregates rebuilt: {'day': 3470, '3d': 9952, 'week': 20389, 'month': 57811, 'quarter': 102260}
+2026-07-30 00:54:52,837 INFO shopalbi.engine: history stored: 3331656 buckets in 82.5s
+2026-07-30 00:54:56,843 INFO uvicorn.access: 85.164.244.215:52119 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:55:03,400 INFO uvicorn.access: 85.164.244.215:64884 - "GET /api/flips?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&limit=400&sort=profit_pct&direction=desc HTTP/1.1" 200
+2026-07-30 00:55:16,870 INFO uvicorn.access: 85.164.244.215:61103 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:55:35,956 INFO uvicorn.access: 127.0.0.1:35902 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:55:36,892 INFO uvicorn.access: 85.164.244.215:60986 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:55:56,860 INFO uvicorn.access: 85.164.244.215:65398 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:56:13,063 INFO uvicorn.access: 85.164.244.215:64294 - "GET /api/flips?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&limit=400&sort=throughput&direction=desc HTTP/1.1" 200
+2026-07-30 00:56:16,842 INFO uvicorn.access: 85.164.244.215:64294 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:56:32,382 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 00:56:32 UTC)" (scheduled at 2026-07-30 00:56:32.382320+00:00)
+2026-07-30 00:56:32,386 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 00:56:36,144 INFO uvicorn.access: 127.0.0.1:37644 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:56:36,877 INFO uvicorn.access: 85.164.244.215:55930 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:56:38,087 INFO uvicorn.access: 85.164.244.215:55930 - "GET /api/plan?window=day&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:56:41,579 INFO uvicorn.access: 85.164.244.215:55930 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:56:48,675 INFO shopalbi.storage: bm_offer rebuilt: 27740 rows (max age 3.0 h)
+2026-07-30 00:56:48,675 INFO shopalbi.engine: current prices stored: 256080 rows in 16.3s
+2026-07-30 00:56:48,722 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 01:01:32 UTC)" executed successfully
+2026-07-30 00:56:51,923 INFO uvicorn.access: 85.164.244.215:64959 - "GET /api/plan?window=week&search=10000&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:56:56,838 INFO uvicorn.access: 85.164.244.215:64959 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:56:59,266 INFO uvicorn.access: 85.164.244.215:64959 - "GET /api/plan?window=week&search=1000000&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=3000000 HTTP/1.1" 200
+2026-07-30 00:57:03,992 INFO uvicorn.access: 85.164.244.215:64959 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=1000 HTTP/1.1" 200
+2026-07-30 00:57:08,909 INFO uvicorn.access: 85.164.244.215:64959 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=100000 HTTP/1.1" 200
+2026-07-30 00:57:16,083 INFO uvicorn.access: 85.164.244.215:53049 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=1000000 HTTP/1.1" 200
+2026-07-30 00:57:16,883 INFO uvicorn.access: 85.164.244.215:53049 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:57:19,265 INFO uvicorn.access: 85.164.244.215:53049 - "GET /api/plan?window=week&min_profit=1000&min_profit_pct=0&min_bm_volume=1&gank_rate=0.08&sell_mode=instant&buy_mode=instant&budget=10000000 HTTP/1.1" 200
+2026-07-30 00:57:36,329 INFO uvicorn.access: 127.0.0.1:54586 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:57:36,903 INFO uvicorn.access: 85.164.244.215:49811 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:57:57,241 INFO uvicorn.access: 85.164.244.215:61481 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:58:16,925 INFO uvicorn.access: 85.164.244.215:61176 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:58:36,518 INFO uvicorn.access: 127.0.0.1:46628 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:58:37,436 INFO uvicorn.access: 85.164.244.215:53474 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:58:57,416 INFO uvicorn.access: 85.164.244.215:49671 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:59:17,430 INFO uvicorn.access: 85.164.244.215:50084 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:59:36,707 INFO uvicorn.access: 127.0.0.1:57644 - "GET /api/health HTTP/1.1" 200
+2026-07-30 00:59:37,777 INFO uvicorn.access: 85.164.244.215:64236 - "GET /api/status HTTP/1.1" 200
+2026-07-30 00:59:56,876 INFO uvicorn.access: 85.164.244.215:65459 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:00:17,423 INFO uvicorn.access: 85.164.244.215:60429 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:00:36,896 INFO uvicorn.access: 127.0.0.1:35332 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:00:37,404 INFO uvicorn.access: 85.164.244.215:49717 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:00:57,424 INFO uvicorn.access: 85.164.244.215:56426 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:01:17,429 INFO uvicorn.access: 85.164.244.215:49671 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:01:32,382 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 01:06:32 UTC)" (scheduled at 2026-07-30 01:01:32.382320+00:00)
+2026-07-30 01:01:32,387 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 01:01:33,452 INFO shopalbi.nats: order feed: 33820 seen, 29548 relevant, 14734 stored, 0 queued (session totals)
+2026-07-30 01:01:37,088 INFO uvicorn.access: 127.0.0.1:46486 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:01:37,422 INFO uvicorn.access: 85.164.244.215:58884 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:01:48,513 INFO shopalbi.storage: bm_offer rebuilt: 27740 rows (max age 3.0 h)
+2026-07-30 01:01:48,513 INFO shopalbi.engine: current prices stored: 256080 rows in 16.1s
+2026-07-30 01:01:48,557 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 01:06:32 UTC)" executed successfully
+2026-07-30 01:01:57,416 INFO uvicorn.access: 85.164.244.215:57931 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:02:37,275 INFO uvicorn.access: 127.0.0.1:46870 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:02:58,429 INFO uvicorn.access: 85.164.244.215:49671 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:03:37,462 INFO uvicorn.access: 127.0.0.1:37446 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:03:59,416 INFO uvicorn.access: 85.164.244.215:49672 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:04:37,648 INFO uvicorn.access: 127.0.0.1:52338 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:05:00,428 INFO uvicorn.access: 85.164.244.215:52305 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:05:37,836 INFO uvicorn.access: 127.0.0.1:37342 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:05:47,311 INFO uvicorn.access: 85.164.244.215:64915 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:05:56,912 INFO uvicorn.access: 85.164.244.215:60660 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:06:16,894 INFO uvicorn.access: 85.164.244.215:59643 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:06:32,382 INFO apscheduler.executors.default: Running job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 01:11:32 UTC)" (scheduled at 2026-07-30 01:06:32.382320+00:00)
+2026-07-30 01:06:32,388 INFO shopalbi.engine: refreshing current prices for 6402 items
+2026-07-30 01:06:36,942 INFO uvicorn.access: 85.164.244.215:61943 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:06:38,029 INFO uvicorn.access: 127.0.0.1:59886 - "GET /api/health HTTP/1.1" 200
+2026-07-30 01:06:48,744 INFO shopalbi.storage: bm_offer rebuilt: 27690 rows (max age 3.0 h)
+2026-07-30 01:06:48,749 INFO shopalbi.engine: current prices stored: 256080 rows in 16.4s
+2026-07-30 01:06:48,789 INFO apscheduler.executors.default: Job "RefreshManager.job_current (trigger: interval[0:05:00], next run at: 2026-07-30 01:11:32 UTC)" executed successfully
+2026-07-30 01:06:56,958 INFO uvicorn.access: 85.164.244.215:59501 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:07:16,930 INFO uvicorn.access: 85.164.244.215:62819 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:07:36,897 INFO uvicorn.access: 85.164.244.215:58437 - "GET /api/status HTTP/1.1" 200
+2026-07-30 01:07:38,218 INFO uvicorn.access: 127.0.0.1:39976 - "GET /api/health HTTP/1.1" 200
