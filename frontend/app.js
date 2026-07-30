@@ -43,6 +43,17 @@ const QUALITY_RU = {
 const qualityRu = (q) => QUALITY_RU[q] || ('q' + q);
 const WIN_RU = { day: 'день', '3d': '3 дня', week: 'неделю', month: 'месяц', quarter: '90 дней' };
 
+// "2026-07-23..2026-07-29" -> "23.07 – 29.07". Shown instead of a vague
+// "last N days" because the aggregates are a stored snapshot: shortly after UTC
+// midnight they still describe yesterday's range, and the exact days matter when
+// you are deciding whether to trust an average.
+function rangeRu(range) {
+  if (!range || range.indexOf('..') < 0) return '';
+  const [a, b] = range.split('..');
+  const d = (s) => (s && s.length >= 10 ? s.slice(8, 10) + '.' + s.slice(5, 7) : s);
+  return a === b ? d(a) : `${d(a)} – ${d(b)}`;
+}
+
 function timeAgo(iso) {
   if (!iso) return 'нет данных';
   const d = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -377,13 +388,31 @@ const EMPTY_MSG = {
   stats: 'Нет данных по этим фильтрам. Если сервер только запустился — подожди, пока догрузится история.',
 };
 
+// An empty table has two very different causes, and blaming the filters when the
+// real problem is stale data sends you chasing the wrong thing. If prices have
+// not refreshed recently, every quote fails the freshness cut-off and nothing can
+// match no matter how the filters are set — say that instead.
+function emptyReason() {
+  const s = state.status;
+  if (!s || !s.current_refreshed_at) {
+    return 'Цены ещё не загружены — идёт первичный сбор данных. Обычно 1–2 минуты.';
+  }
+  const mins = (Date.now() - new Date(s.current_refreshed_at).getTime()) / 60000;
+  if (mins > 20) {
+    return `<b>Цены не обновлялись ${Math.round(mins)} мин</b>, а котировки старше`
+      + ' нескольких часов в расчёт не берутся — поэтому пусто, и фильтры тут не виноваты.'
+      + '<br>Нажми «⟳ Обновить» и проверь логи: <code>/root/logs/shopalbi.log</code>.';
+  }
+  return EMPTY_MSG[state.view] || 'Нет данных.';
+}
+
 function renderRows(cols, rows) {
   const tb = $('#tbody');
   if (!rows.length) {
     tb.innerHTML = '';
     const e = $('#emptyState');
     e.hidden = false;
-    e.innerHTML = EMPTY_MSG[state.view] || 'Нет данных.';
+    e.innerHTML = emptyReason();
     return;
   }
   $('#emptyState').hidden = true;
@@ -452,7 +481,7 @@ function renderNote(d) {
       ? `закупка только в <b>${esc(cityRu(d.buy_city))}</b>`
       : 'по каждому предмету показан лучший город';
     n.innerHTML = `${where} · прибыль = <code>ставка ЧР × ${d.net} − цена закупки${d.cost_mult !== 1 ? ' × ' + d.cost_mult : ''}</code>`
-      + ` · «По средней ЧР» — та же сделка по средней цене ЧР за ${w} (защита от разового скачка)`
+      + ` · «По средней ЧР» — та же сделка по средней цене ЧР за <b>${esc(rangeRu(d.window_range) || w)}</b> (защита от разового скачка)`
       + ` · сортировка по столбцу — клик по заголовку, наведи на заголовок чтобы увидеть формулу.`;
   } else if (state.view === 'plan') {
     const b = d.best;
@@ -471,7 +500,8 @@ function renderNote(d) {
       depth: `<b>рынок кончился раньше бюджета</b>: по всем ${fmt(b.candidates)} подходящим позициям`
         + ` выбрано всё, что Чёрный рынок реально успевает выкупить. Остаток некуда деть, не переплачивая.`
         + ` Расширь период или ослабь фильтры в «⚙ Модель» — станет больше позиций.`,
-      positions: `упёрлись в лимит позиций (${b.max_items}). Больше наименований за один рейс не унести.`,
+      positions: `упёрлись в <b>лимит позиций (${b.max_items})</b> — столько разных наименований`
+        + ` за рейс уже много. Поднять: <code>SHOPALBI_RECOMMEND_MAX_ITEMS</code> в docker-compose.yml.`,
       filters: 'под текущие фильтры нет ни одной подходящей позиции.',
     }[b.limit_reason] || '';
     n.innerHTML = `${mode}. Размещено <b>${spentPct}%</b> бюджета — ${why}`
@@ -481,8 +511,9 @@ function renderNote(d) {
     n.innerHTML = `Города отсортированы по сумме оценок лучших ${d.top_n} флипов за ${w}.`
       + ` Начинай с верхнего. <b>Карлеон</b> стоит особняком: цены там выше, зато риск потерять груз нулевой — до ЧР пара шагов.`;
   } else {
-    n.innerHTML = `Показано <b>${fmt(d.rows.length)}</b> из <b>${fmt(d.total)}</b> · цены средневзвешенные по объёму сделок за ${w}`
-      + ` (последние ${d.window_days} полных суток UTC) · клик по названию города — сортировка по его цене · зелёным отмечен самый дешёвый город.`;
+    n.innerHTML = `Показано <b>${fmt(d.rows.length)}</b> из <b>${fmt(d.total)}</b> · цены средневзвешенные по объёму сделок`
+      + ` за <b>${esc(rangeRu(d.window_range) || w)}</b> (${d.window_days} полных суток UTC)`
+      + ` · клик по названию города — сортировка по его цене · зелёным отмечен самый дешёвый город.`;
   }
 }
 
@@ -578,6 +609,7 @@ function exportCsv() {
 async function pollStatus() {
   try {
     const s = await fetchJSON('/api/status', 10000);
+    state.status = s;
     const dot = $('#statusDot');
     const ob = s.orderbook || {};
     if (!s.current_refreshed_at || !s.current_rows) {

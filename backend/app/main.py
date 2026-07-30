@@ -73,6 +73,9 @@ async def lifespan(app: FastAPI):
     client = AodpClient()
     _analytics = Analytics(_storage)
     engine.ensure_catalog(_storage)
+    # Existing databases carry price/history rows for items the catalog has since
+    # dropped; clear them once at startup so row counts mean what they say.
+    _storage.purge_orphans()
     # After an upgrade the derived tables are empty (they are rebuilt from
     # scratch whenever the data model changes), while `history` and
     # `current_prices` survive. Rebuilding them here costs a second or two and

@@ -230,6 +230,26 @@ class Storage:
 
     # -- catalog ------------------------------------------------------------
 
+    def purge_orphans(self) -> dict[str, int]:
+        """Drop rows for item ids that are no longer in the catalog.
+
+        When the catalog shrinks (v5 removed gathering gear: 6,852 -> 6,402
+        items) the price/history rows for the dropped ids stay behind forever.
+        Queries JOIN `items`, so they never reach the UI, but they waste space
+        and make row counts lie — a live database showed 274,080 rows in
+        `current_prices` while a refresh only ever writes 256,080.
+        """
+        out: dict[str, int] = {}
+        with self.cursor() as cur:
+            for table in ("current_prices", "history", "bm_offer", "agg", "order_book"):
+                cur.execute(
+                    f"DELETE FROM {table} WHERE item_id NOT IN (SELECT item_id FROM items)")
+                if cur.rowcount:
+                    out[table] = cur.rowcount
+        if out:
+            log.info("purged rows for items no longer in the catalog: %s", out)
+        return out
+
     def replace_items(self, items: list[Item]) -> int:
         with self.cursor() as cur:
             cur.execute("DELETE FROM items")
@@ -383,6 +403,15 @@ class Storage:
                     (window, days, first, last),
                 )
                 out[window] = cur.rowcount
+                # Record the exact range each window covers. `agg` is a stored
+                # snapshot rebuilt every HISTORY_REFRESH_HOURS, so shortly after
+                # UTC midnight it still describes yesterday's range. Saying which
+                # days are actually averaged beats claiming "the last N days".
+                cur.execute(
+                    "INSERT INTO meta(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (f"agg_range_{window}", f"{first}..{last}"),
+                )
         log.info("aggregates rebuilt: %s", out)
         return out
 

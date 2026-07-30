@@ -58,6 +58,12 @@ class NatsConsumer:
         self._thread.start()
         log.info("NATS consumer started (topics=%s)", ",".join(config.NATS_TOPICS))
 
+    def backlog(self) -> int:
+        """Orders accepted but not yet written. Non-zero for long means the
+        flush cap is too small for the current feed rate."""
+        with self._buf_lock:
+            return len(self._buffer)
+
     def refresh_items(self) -> None:
         """Re-read the catalog so a fresh install starts filtering correctly."""
         self._item_ids = set(self.storage.all_item_ids())
@@ -135,12 +141,24 @@ class NatsConsumer:
                 self._handle_order(payload)
 
     def _drain_buffer(self) -> list[tuple]:
+        """Take up to ORDER_FLUSH_MAX orders, LEAVING the remainder buffered.
+
+        This used to clear the whole buffer and return only the first slice,
+        silently discarding the overflow. The bulk topic delivers arrays, so
+        bursts routinely exceed the cap: on a live run the log read
+        "413144 seen, 317734 relevant, 159415 stored" — half the orders we had
+        already decided to keep never reached the database.
+        """
         with self._buf_lock:
             if not self._buffer:
                 return []
-            batch = list(self._buffer.values())
-            self._buffer = {}
-        return batch[: config.ORDER_FLUSH_MAX] if len(batch) > config.ORDER_FLUSH_MAX else batch
+            if len(self._buffer) <= config.ORDER_FLUSH_MAX:
+                batch = list(self._buffer.values())
+                self._buffer = {}
+                return batch
+            keys = list(self._buffer.keys())[: config.ORDER_FLUSH_MAX]
+            batch = [self._buffer.pop(k) for k in keys]
+        return batch
 
     async def _main(self) -> None:
         nc = await nats.connect(
@@ -186,9 +204,11 @@ class NatsConsumer:
                     log.exception("failed to prune orders")
             if (now - last_log).total_seconds() > 600:
                 last_log = now
+                # `stored` must track `relevant` closely; a persistent gap means
+                # orders are being dropped rather than merely queued.
                 log.info(
-                    "order feed: %d seen, %d relevant, %d stored",
-                    self._received, self._kept, self._stored,
+                    "order feed: %d seen, %d relevant, %d stored, %d queued (session totals)",
+                    self._received, self._kept, self._stored, self.backlog(),
                 )
 
         batch = self._drain_buffer()

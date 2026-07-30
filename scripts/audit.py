@@ -95,6 +95,38 @@ def main() -> int:
             "AND quality=? AND day >= date('now', ?) AND day <= date('now','-1 day') "
             "ORDER BY day",
             (probe["item_id"], probe["city"], probe["quality"], f"-{days} day")).fetchall()
+
+        # Compare against the range `agg` actually used, not a freshly computed
+        # one. `agg` is a stored snapshot rebuilt every few hours, so after UTC
+        # midnight it still covers yesterday's range — recomputing the window
+        # here would report a false MISMATCH against perfectly correct data.
+        rng = raw.execute("SELECT value v FROM meta WHERE key=?",
+                          (f"agg_range_{args.window}",)).fetchone()
+        if rng and ".." in rng["v"]:
+            first, last = rng["v"].split("..")
+            print(f"    agg покрывает {first} .. {last} (записано при сборке)")
+            rows = raw.execute(
+                "SELECT day, item_count, avg_price FROM history WHERE item_id=? AND city=? "
+                "AND quality=? AND day >= ? AND day <= ? ORDER BY day",
+                (probe["item_id"], probe["city"], probe["quality"], first, last)).fetchall()
+            need = first
+        else:
+            need = raw.execute("SELECT date('now', ?) d", (f"-{days} day",)).fetchone()["d"]
+            print("    (диапазон agg не записан — старая база; сверяю по расчётному окну)")
+
+        # `agg` is built from the FULL history, so comparing it against a raw
+        # table that has been trimmed (export_snapshot.py keeps only a few days)
+        # would also report a false MISMATCH. Check coverage before comparing.
+        span = raw.execute("SELECT MIN(day) mn, MAX(day) mx FROM history").fetchone()
+        covered = bool(span["mn"]) and span["mn"] <= need
+        if rows and not covered:
+            print(f"    ПРОПУСК СВЕРКИ: окно {args.window} требует историю с {need}, "
+                  f"а в базе она только с {span['mn']}.")
+            print("    Так бывает в снимке из export_snapshot.py — он обрезает сырую историю,")
+            print("    а agg посчитан по полной. Для сверки запусти аудит на рабочей базе")
+            print("    (/data/shopalbi.db) или сделай экспорт с --full.")
+            rows = []
+
         if rows:
             vol = sum(r["item_count"] for r in rows)
             pv = sum(r["avg_price"] * r["item_count"] for r in rows)

@@ -185,6 +185,7 @@ def ensure_catalog(storage: Storage, force: bool = False) -> int:
         return storage.item_count()
     items = build_items(force=force)
     n = storage.replace_items(items)
+    storage.purge_orphans()
     storage.set_meta("catalog_refreshed_at", datetime.now(timezone.utc).isoformat())
     storage.set_meta("catalog_count", str(n))
     log.info("catalog stored: %d items", n)
@@ -280,6 +281,8 @@ class Analytics:
             "orderbook_received": int(s.get_meta("orderbook_received", "0")),
             "orderbook_updated_at": s.get_meta("orderbook_updated_at"),
             "refresh_running": s.get_meta("refresh_running", "0") == "1",
+            # Which calendar days each window actually averages.
+            "agg_ranges": {w: s.get_meta(f"agg_range_{w}") for w in config.STAT_WINDOWS},
             "server": config.API_HOST,
             "sales_tax": config.SALES_TAX,
             "setup_fee": config.SETUP_FEE,
@@ -563,6 +566,7 @@ class Analytics:
         return {
             "window": window,
             "window_days": config.STAT_WINDOWS.get(window, 7),
+            "window_range": self.storage.get_meta(f"agg_range_{window}"),
             "buy_mode": buy_mode,
             "sell_mode": sell_mode,
             "net": round(config.net_factor(sell_mode), 4),
@@ -753,6 +757,7 @@ class Analytics:
         return {
             "window": window,
             "window_days": config.STAT_WINDOWS.get(window, 7),
+            "window_range": self.storage.get_meta(f"agg_range_{window}"),
             "total": total, "offset": offset, "limit": limit,
             "sort": sort, "direction": direction,
             "cities": config.ROYAL_CITIES,
@@ -838,6 +843,75 @@ class Analytics:
             ],
         }
 
+    @staticmethod
+    def _volume_cap(meta: dict) -> int:
+        """Units the Black Market plausibly absorbs, when live depth is unknown.
+
+        Driven by measured daily throughput; the constant is only a backstop
+        against absurd numbers, never the thing that decides the quantity.
+        """
+        cap = config.RECOMMEND_NODEPTH_CAP
+        daily = meta["bm_daily_volume"]
+        if daily > 0:
+            cap = min(cap, max(1, int(daily * config.RECOMMEND_VOLUME_CAPTURE)))
+        return cap
+
+    @staticmethod
+    def _synth_requests(group: list[dict]) -> list[list]:
+        """Synthetic Black Market demand built from the REST snapshot.
+
+        `buy_price_max` is the single HIGHEST buy order, and on live data that
+        top order carries only a small slice of an item's real demand — measured
+        on a 265k-unit snapshot of the Black Market book, as little as 1-3% for
+        liquid items (T5_BAG: 48 units of 1,702 at the best price; T4_CAPE: 12 of
+        1,324). Pricing a whole bulk quantity at that one bid overstates revenue,
+        so only the first RECOMMEND_TRUST_MIN_PRICE_QTY units get it and the rest
+        fall back to the Black Market's own volume-weighted average, which is
+        what the deeper orders actually pay.
+
+        Keyed by the buy order's own quality so that several held qualities
+        cannot each discover the same order and double-count the demand.
+        """
+        by_order: dict[int, dict] = {}
+        for m in group:
+            q = m["bm_quality"]
+            cur = by_order.get(q)
+            if cur is None or m["bm_price"] > cur["bm_price"]:
+                by_order[q] = m
+        out: list[list] = []
+        for q, m in by_order.items():
+            cap = Analytics._volume_cap(m)
+            trust = min(cap, config.RECOMMEND_TRUST_MIN_PRICE_QTY)
+            top = float(m["bm_price"])
+            out.append([top, trust, q])
+            rest = cap - trust
+            if rest > 0:
+                # never above the observed top bid, and only if we have history
+                deep = min(float(m["bm_vwap"] or 0), top)
+                if deep > 0:
+                    out.append([deep, rest, q])
+        return out
+
+    @staticmethod
+    def _synth_offers(group: list[dict]) -> list[list]:
+        """Synthetic city supply built from the REST snapshot.
+
+        Same reasoning mirrored: we know the cheapest listing's price but not how
+        many units sit behind it, so beyond the first few units the expected fill
+        price rises to the city's own volume-weighted average.
+        """
+        out: list[list] = []
+        for m in group:
+            cap = Analytics._volume_cap(m)
+            trust = min(cap, config.RECOMMEND_TRUST_MIN_PRICE_QTY)
+            cheapest = float(m["buy_price"])
+            out.append([cheapest, trust, m["quality"]])
+            rest = cap - trust
+            if rest > 0:
+                deep = max(cheapest, float(m["city_vwap"] or 0))
+                out.append([deep, rest, m["quality"]])
+        return out
+
     def _plan_city(self, city, budget, cands, offers, bm_req, net, cost_mult, gank) -> dict:
         """Build one city's plan. Returns aggregated per-item buy instructions."""
         p = city_gank_rate(city, gank)
@@ -846,79 +920,54 @@ class Analytics:
             by_item[c["item_id"]].append(c)
 
         # ---- 1. enumerate fillable lots -----------------------------------
+        # Both sides are modelled as an order book: the real live one where the
+        # feed has it, a small synthetic one derived from the REST snapshot where
+        # it does not. A single matching routine then covers every combination
+        # (both live / only the Black Market live / only the city live / neither).
+        #
+        # The previous all-or-nothing split required BOTH sides to be live before
+        # using any real depth, which on live data threw away genuine Black
+        # Market demand for 1,134 items whose city side simply had not been
+        # scanned recently.
         lots: list[dict] = []
         for item_id, group in by_item.items():
-            reqs = [list(r) for r in bm_req.get(item_id, [])]
-            offs = offers.get((city, item_id))
-            meta_by_q = {g["quality"]: g for g in group}
-            live_lots: list[dict] = []
+            live_reqs = [list(r) for r in bm_req.get(item_id, [])]
+            live_offs = [list(o) for o in offers.get((city, item_id), [])]
+            bm_live, city_live = bool(live_reqs), bool(live_offs)
 
-            if reqs and offs:
-                # Real depth. One shared pool of BM buy orders per item, so the
-                # same NPC order can never be sold into twice even though
-                # several held qualities are eligible for it (quality ladder).
-                for price, amount, held_q, _age in sorted(offs, key=lambda x: x[0]):
-                    meta = meta_by_q.get(held_q)
-                    if meta is None:
-                        continue
-                    left = amount
-                    while left > 0:
-                        pick = next(
-                            (r for r in reqs if r[2] <= held_q and r[1] > 0
-                             and r[0] * net - price * cost_mult > 0),
-                            None,
-                        )
-                        if pick is None:
-                            break
-                        take = min(left, pick[1])
-                        live_lots.append({
-                            "item_id": item_id, "meta": meta, "qty": take,
-                            "unit_cost": price * cost_mult, "unit_rev": pick[0] * net,
-                            "buy_price": price, "bm_price": pick[0],
-                            "bm_quality": pick[2], "source": "live",
-                        })
-                        pick[1] -= take
-                        left -= take
-
-            if live_lots:
-                lots.extend(live_lots)
+            reqs = live_reqs if bm_live else self._synth_requests(group)
+            offs = live_offs if city_live else self._synth_offers(group)
+            if not reqs or not offs:
                 continue
+            src = ("live" if city_live else "bm") if bm_live else ("city" if city_live else "est")
+            meta_by_q = {g["quality"]: g for g in group}
 
-            # No usable live depth for this item -> hard-capped REST estimate.
-            # (Falling back rather than dropping the item matters: the live feed
-            # only carries markets players actually opened, so a thin book is
-            # missing data, not evidence that the flip is bad.)
-            for meta in group:
-                # How many units the Black Market plausibly absorbs. This is the
-                # bound that should bite; the constant is only a backstop.
-                cap = config.RECOMMEND_NODEPTH_CAP
-                if meta["bm_daily_volume"] > 0:
-                    cap = min(cap, max(1, int(meta["bm_daily_volume"] * config.RECOMMEND_VOLUME_CAPTURE)))
-
-                # First few units can realistically be had at the cheapest listed
-                # price. Beyond that we are clearing several lots, and the city's
-                # own volume-weighted average is the honest expected fill price —
-                # otherwise a big quantity silently assumes the whole book sits at
-                # the single best offer.
-                trust_qty = min(cap, config.RECOMMEND_TRUST_MIN_PRICE_QTY)
-                cheap_cost = float(meta["buy_cost"])
-                bulk_price = max(float(meta["buy_price"]), float(meta.get("city_vwap") or 0))
-                bulk_cost = bulk_price * cost_mult
-                rev = float(meta["bm_price"]) * net
-
-                lots.append({
-                    "item_id": item_id, "meta": meta, "qty": trust_qty,
-                    "unit_cost": cheap_cost, "unit_rev": rev,
-                    "buy_price": meta["buy_price"], "bm_price": meta["bm_price"],
-                    "bm_quality": meta["bm_quality"], "source": "est",
-                })
-                if cap > trust_qty and bulk_cost > 0:
+            # One shared pool of buy orders per item, so the same order can never
+            # be sold into twice even though several held qualities are eligible
+            # for it (the quality ladder).
+            for offer in sorted(offs, key=lambda x: x[0]):
+                price, amount, held_q = offer[0], offer[1], offer[2]
+                meta = meta_by_q.get(held_q)
+                if meta is None:
+                    continue
+                left = amount
+                while left > 0:
+                    pick = next(
+                        (r for r in reqs if r[2] <= held_q and r[1] > 0
+                         and r[0] * net - price * cost_mult > 0),
+                        None,
+                    )
+                    if pick is None:
+                        break
+                    take = min(left, pick[1])
                     lots.append({
-                        "item_id": item_id, "meta": meta, "qty": cap - trust_qty,
-                        "unit_cost": bulk_cost, "unit_rev": rev,
-                        "buy_price": round(bulk_price), "bm_price": meta["bm_price"],
-                        "bm_quality": meta["bm_quality"], "source": "est",
+                        "item_id": item_id, "meta": meta, "qty": take,
+                        "unit_cost": price * cost_mult, "unit_rev": pick[0] * net,
+                        "buy_price": round(price), "bm_price": round(pick[0]),
+                        "bm_quality": pick[2], "source": src,
                     })
+                    pick[1] -= take
+                    left -= take
 
         # ---- 2. greedy budget fill ----------------------------------------
         # Rank by risk-adjusted return per silver spent, weighted by how much we
