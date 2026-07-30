@@ -431,10 +431,16 @@ def api_sets_delete(set_id: int, _=Depends(require_auth)):
 def api_sets_price(
     set_id: int,
     allow_higher_quality: bool = Query(True),
+    use_equivalents: bool = Query(
+        True,
+        description="Accept any tier/enchant with the same item power "
+                    "(T8.0 = T7.1 = T6.2 = T5.3) and take the cheapest in each city.",
+    ),
     _=Depends(require_auth),
 ):
     """Cost the set in every city; cities that can supply it whole rank first."""
-    res = _pricer().price_set(set_id, allow_higher_quality=allow_higher_quality)
+    res = _pricer().price_set(set_id, allow_higher_quality=allow_higher_quality,
+                              use_equivalents=use_equivalents)
     if res is None:
         raise HTTPException(status_code=404, detail="set not found")
     return res

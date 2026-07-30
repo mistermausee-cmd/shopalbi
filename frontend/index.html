@@ -142,6 +142,15 @@
             <input type="text" id="setNote" class="input" placeholder="для чего этот сет" maxlength="400" />
           </label>
           <label class="fld">
+            <span>Эквивалент по силе
+              <i class="hint" title="Сила предмета = 300 + (тир + зачарование) × 100. Значит T8.0 = T7.1 = T6.2 = T5.3 = T4.4 — все 1100 IP. Включено: для каждой позиции берётся самый дешёвый равносильный вариант, доступный в этом городе. Именные артефакты (Рука Кхора и подобные) не подменяются — это другие предметы.">?</i>
+            </span>
+            <select id="setEquiv" class="input">
+              <option value="1">Брать любой равный по силе</option>
+              <option value="0">Только точно указанный тир</option>
+            </select>
+          </label>
+          <label class="fld">
             <span>Качество отсутствует</span>
             <select id="setSubst" class="input" title="Что делать, если нужного качества нет в продаже">
               <option value="1">Брать лучшее качество</option>

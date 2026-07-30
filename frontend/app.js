@@ -931,7 +931,9 @@ async function setsPrice() {
   $('#loader').hidden = false;
   try {
     const subst = $('#setSubst').value === '1';
-    const d = await fetchJSON(`/api/sets/${state.setId}/price?allow_higher_quality=${subst}`, 60000);
+    const equiv = $('#setEquiv').value === '1';
+    const d = await fetchJSON(
+      `/api/sets/${state.setId}/price?allow_higher_quality=${subst}&use_equivalents=${equiv}`, 60000);
     state.setPrice = d;
     renderSetPrice(d);
     setsTogglePanels();
@@ -959,12 +961,18 @@ function renderSetPrice(d) {
     kpi('Городов с полным сетом', fmt(d.cities.filter((c) => c.complete).length),
         `из ${d.cities.length}`);
 
+  const swapped = b.lines.filter((x) => x.equivalent).length;
   $('#setNoteLine').innerHTML =
     'Города, где есть <b>все</b> позиции, идут первыми — город дешевле, но без одной вещи, '
     + 'означает вторую поездку. Цены — минимальные ордера продажи на момент расчёта'
     + (d.allow_higher_quality
-      ? '. Если нужного качества нет, подставляется лучшее (помечено «замена»).'
-      : '. Подстановка лучшего качества выключена.');
+      ? '. Если нужного качества нет, подставляется лучшее (помечено «замена»)'
+      : '. Подстановка лучшего качества выключена')
+    + (d.use_equivalents
+      ? `. Эквивалент по силе включён: рассмотрено ${fmt(d.variants_considered)} вариантов`
+        + (swapped ? `, выгоднее взять другой тир в <b>${swapped}</b> позициях` : '')
+        + '. Именные артефакты не подменяются.'
+      : '. Эквивалент выключен — берётся ровно указанный тир.');
 
   $('#setCitiesHead').innerHTML = '<tr><th class="left">Город</th><th>Итого</th>'
     + '<th>Позиций</th><th class="left">Чего нет</th></tr>';
@@ -990,8 +998,12 @@ function renderSetPrice(d) {
         + `<span class="sub2">${esc(e.category_label)}</span></td>`
         + `<td colspan="4"><span class="neg">${esc(why)}</span></td></tr>`;
     }
-    return `<tr><td class="left">${esc(e.name)}`
-      + `<span class="sub2"><span class="pill tier">${esc(e.tier_ench)}</span> ${esc(e.category_label)}</span></td>`
+    // When an equal-power variant is cheaper, the row shows what to actually put
+    // in the basket — the tier you asked for is only a power target.
+    const what = e.equivalent
+      ? `${esc(e.buy_name)} <span class="pill up" title="Тот же предмет другого тира с той же силой ${e.item_power} IP. Запрошено ${esc(e.tier_ench)}, дешевле взять ${esc(e.buy_tier_ench)}.">${esc(e.buy_tier_ench)} вместо ${esc(e.tier_ench)}</span>`
+      : `${esc(e.name)}<span class="sub2"><span class="pill tier">${esc(e.tier_ench)}</span> ${esc(e.category_label)}${e.item_power ? ' · ' + e.item_power + ' IP' : ''}</span>`;
+    return `<tr><td class="left">${what}</td>`
       + `<td><span class="q q${e.quality}"></span>${esc(e.quality_label)}`
       + (e.substituted
         ? `<span class="sub2" title="Запрошено «${esc(e.want_quality_label)}», но в продаже только лучше">замена</span>`
@@ -1050,6 +1062,7 @@ function wireSets() {
     if (!e.target.closest('.sets-add')) $('#setSuggest').hidden = true;
   });
   $('#setSubst').addEventListener('change', setsPrice);
+  $('#setEquiv').addEventListener('change', setsPrice);
   $('#setSaveBtn').addEventListener('click', () => setsSave(true));
 
   $('#setNewBtn').addEventListener('click', async () => {

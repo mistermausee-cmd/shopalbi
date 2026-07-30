@@ -18,6 +18,7 @@ Two things matter for the answer to be useful rather than merely arithmetic:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -28,6 +29,62 @@ from .catalog import SHOP_CATEGORY_NAMES, tier_label
 from .storage import Storage
 
 log = logging.getLogger("shopalbi.sets")
+
+# --------------------------------------------------------------------------
+# Item power equivalence
+# --------------------------------------------------------------------------
+#
+# Verified against https://wiki.albiononline.com/wiki/Enchantment ("Each
+# enchantment level adds 100 IP") and the per-tier tables on the gear pages
+# (Cape: T2 = 500, T3 = 600, T4 = 700 -> +100 per tier):
+#
+#     item power = 300 + (tier + enchant) * 100
+#
+# So anything with the same `tier + enchant` has the same item power and is
+# interchangeable in a build:
+#
+#     T8.0  =  T7.1  =  T6.2  =  T5.3  =  T4.4   -> 1100 IP
+#
+# That matters for shopping because the prices of equivalent variants differ
+# wildly — an enchanted lower tier is often far cheaper than the plain high tier,
+# and it is the same item power on your character.
+#
+# Consumables and mounts are deliberately excluded: enchanted food is *better*
+# food rather than an equal-power alternative, and mounts have no enchant ladder.
+_EQUIV_CATEGORIES = {"weapon", "armor", "offhand", "cape", "bag", "gatherer", "tool"}
+
+_TIER_PREFIX_RE = re.compile(r"^T(\d)_")
+_ENCH_SUFFIX_RE = re.compile(r"@(\d)$")
+
+
+def item_power(tier: int, enchant: int) -> int:
+    return 300 + (tier + enchant) * 100
+
+
+def item_family(item_id: str) -> str | None:
+    """`T8_ARMOR_PLATE_SET1` and `T5_ARMOR_PLATE_SET1@3` -> `ARMOR_PLATE_SET1`.
+
+    The family is what makes two variants the *same item* rather than merely
+    equal in power; without it a plate chest would be swapped for a cloth robe.
+    """
+    m = _TIER_PREFIX_RE.match(item_id)
+    if not m:
+        return None
+    return _ENCH_SUFFIX_RE.sub("", item_id[m.end():])
+
+
+def equivalent_ids(item_id: str, tier: int, enchant: int) -> list[str]:
+    """Every tier/enchant combination of the same item with equal item power."""
+    family = item_family(item_id)
+    if family is None:
+        return [item_id]
+    target = tier + enchant
+    out = []
+    for t in config.TIERS:                       # T4..T8 by default
+        e = target - t
+        if 0 <= e <= 4:
+            out.append(f"T{t}_{family}" + (f"@{e}" if e else ""))
+    return out or [item_id]
 
 # Cities worth shopping in. Unlike the flip engine this includes Brecilien and
 # Caerleon: the exclusion there is about hauling to the Black Market, which has
@@ -95,7 +152,33 @@ class SetPricer:
                 self._cache.pop(min(self._cache, key=lambda k: self._cache[k][0]), None)
         return out
 
-    def price_set(self, set_id: int, allow_higher_quality: bool = True) -> dict | None:
+    def _line_variants(self, ln: dict, meta: dict, use_equivalents: bool) -> list[dict]:
+        """Candidate items that satisfy one set line, cheapest-first at price time.
+
+        With equivalence on, an equipment line accepts any tier/enchant with the
+        same item power, so the city that has T6.2 cheap can still complete a set
+        built around T8.0.
+        """
+        m = meta.get(ln["item_id"])
+        cat = m["category"] if m else ""
+        if not use_equivalents or cat not in _EQUIV_CATEGORIES or not m:
+            return [{"item_id": ln["item_id"], "tier": m["tier"] if m else 0,
+                     "enchant": m["enchant"] if m else 0}]
+        ids = equivalent_ids(ln["item_id"], m["tier"], m["enchant"])
+        known = self.storage.shop_items_by_ids(ids)
+        # The id family is NOT sufficient on its own: the game reuses an id
+        # pattern for named artifacts at the top tier. `T8_2H_AXE` is "The Hand of
+        # Khor", not a T8 Greataxe, so treating it as equivalent to `T7_2H_AXE@1`
+        # would swap a unique weapon for an ordinary one with different abilities.
+        # Requiring an identical display name (tier word already stripped) is a
+        # data-driven guard that catches every such case.
+        want_name = m["name_disp"]
+        out = [{"item_id": i, "tier": known[i]["tier"], "enchant": known[i]["enchant"]}
+               for i in ids if i in known and known[i]["name_disp"] == want_name]
+        return out or [{"item_id": ln["item_id"], "tier": m["tier"], "enchant": m["enchant"]}]
+
+    def price_set(self, set_id: int, allow_higher_quality: bool = True,
+                  use_equivalents: bool = True) -> dict | None:
         """Cost the set in every city and rank the cities.
 
         `allow_higher_quality`: a buy order is not involved here — you are picking
@@ -110,7 +193,12 @@ class SetPricer:
         if not lines:
             return {**s, "cities": [], "priced_at": None, "lines_priced": []}
 
-        item_ids = [ln["item_id"] for ln in lines]
+        meta = self.storage.shop_items_by_ids([ln["item_id"] for ln in lines])
+
+        # Expand each line into its acceptable variants, then price them all in a
+        # single request. Up to 5 equivalents per line still fits one API call.
+        variants = [self._line_variants(ln, meta, use_equivalents) for ln in lines]
+        item_ids = sorted({v["item_id"] for vs in variants for v in vs})
         # Ask for the requested quality and everything above it, so a substitute
         # can be found in one request rather than a second round trip.
         qualities = sorted({q for ln in lines
@@ -118,23 +206,25 @@ class SetPricer:
                                            max(config.QUALITIES) + 1 if allow_higher_quality
                                            else int(ln["quality"] or 1) + 1)})
         quotes = self._quotes(item_ids, qualities or [1])
-
-        meta = self.storage.shop_items_by_ids(item_ids)
+        var_meta = self.storage.shop_items_by_ids(item_ids)
         per_city: list[dict] = []
         for city in SHOP_CITIES:
             city_lines = []
             total = 0
             missing = 0
-            for ln in lines:
+            for li, ln in enumerate(lines):
                 want_q = int(ln["quality"] or 1)
+                # Cheapest equal-power variant available IN THIS CITY. Choosing per
+                # city (not globally) is the whole point: the answer has to be
+                # buyable in one place.
                 found = None
-                for q in range(want_q, max(config.QUALITIES) + 1):
-                    hit = quotes.get((ln["item_id"], city, q))
-                    if hit:
-                        found = (q, hit[0], hit[1])
-                        break
-                    if not allow_higher_quality:
-                        break
+                for v in variants[li]:
+                    for q in range(want_q, max(config.QUALITIES) + 1):
+                        hit = quotes.get((v["item_id"], city, q))
+                        if hit and (found is None or hit[0] < found[1]):
+                            found = (q, hit[0], hit[1], v)
+                        if hit or not allow_higher_quality:
+                            break
                 m = meta.get(ln["item_id"])
                 qty = max(1, int(ln["qty"] or 1))
                 entry = {
@@ -153,7 +243,9 @@ class SetPricer:
                     "qty": qty,
                 }
                 if found:
-                    q, price, date = found
+                    q, price, date, v = found
+                    vm = var_meta.get(v["item_id"])
+                    swapped = v["item_id"] != ln["item_id"]
                     entry.update({
                         "available": True,
                         "quality": q,
@@ -162,13 +254,22 @@ class SetPricer:
                         "unit_price": price,
                         "line_total": price * qty,
                         "price_date": date,
+                        # What to actually put in the basket, which may be a
+                        # different tier/enchant of the same item at equal power.
+                        "buy_item_id": v["item_id"],
+                        "buy_name": vm["name_disp"] if vm else v["item_id"],
+                        "buy_tier_ench": tier_label(v["tier"], v["enchant"]),
+                        "equivalent": swapped,
+                        "item_power": item_power(v["tier"], v["enchant"]),
                     })
                     total += price * qty
                 else:
                     entry.update({
                         "available": False, "quality": None, "quality_label": None,
                         "substituted": False, "unit_price": 0, "line_total": 0,
-                        "price_date": None,
+                        "price_date": None, "buy_item_id": None, "buy_name": None,
+                        "buy_tier_ench": None, "equivalent": False,
+                        "item_power": item_power(m["tier"], m["enchant"]) if m and m["tier"] else None,
                     })
                     missing += 1
                 city_lines.append(entry)
@@ -209,4 +310,6 @@ class SetPricer:
                 (best["total"] - split_total) if (best and best["complete"] and split_ok) else None
             ),
             "allow_higher_quality": allow_higher_quality,
+            "use_equivalents": use_equivalents,
+            "variants_considered": sum(len(v) for v in variants),
         }
