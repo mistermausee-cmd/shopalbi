@@ -140,6 +140,20 @@ def _check_mode(name: str, value: str) -> None:
         raise HTTPException(status_code=400, detail=f"{name} must be 'instant' or 'order'")
 
 
+def _check_buy_city(city: str | None) -> None:
+    """Reject cities that are not permitted buy sources.
+
+    Without this, `?buy_city=Brecilien` bypasses the exclusion policy and
+    `?buy_city=Atlantis` silently returns an empty table that looks like a data
+    problem rather than a bad request.
+    """
+    if city and city not in config.BUY_CITIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{city}' is not a buy city. Allowed: {', '.join(config.BUY_CITIES)}",
+        )
+
+
 # -- API --------------------------------------------------------------------
 
 @app.get("/api/status")
@@ -193,6 +207,7 @@ def api_flips(
     _check_window(window)
     _check_mode("buy_mode", buy_mode)
     _check_mode("sell_mode", sell_mode)
+    _check_buy_city(buy_city)
     return _an().flips(
         window=window, buy_mode=buy_mode, sell_mode=sell_mode,
         min_profit=min_profit, min_profit_pct=min_profit_pct,
@@ -252,6 +267,7 @@ def api_plan(
     _check_window(window)
     _check_mode("buy_mode", buy_mode)
     _check_mode("sell_mode", sell_mode)
+    _check_buy_city(city)
     return _an().plan(
         budget=budget, city=city, window=window, buy_mode=buy_mode, sell_mode=sell_mode,
         min_profit=min_profit, min_profit_pct=min_profit_pct,

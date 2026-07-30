@@ -46,9 +46,15 @@ class NatsConsumer:
         self._buf_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._received = 0
-        self._kept = 0
-        self._stored = 0
+        # Session counters. `accepted` counts order objects that pass our filters
+        # and `written` counts rows actually upserted. They should track each
+        # other closely; a lasting gap means orders are being dropped. (They used
+        # to differ by exactly 2x, which was not data loss at all but the same
+        # order arriving on two duplicate topics — see config.NATS_TOPICS.)
+        self._messages = 0
+        self._seen = 0
+        self._accepted = 0
+        self._written = 0
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -94,7 +100,7 @@ class NatsConsumer:
             return False
 
     def _handle_order(self, o: dict) -> None:
-        self._received += 1
+        self._seen += 1
         item_id = o.get("ItemTypeId")
         if item_id not in self._item_ids:
             return
@@ -120,9 +126,10 @@ class NatsConsumer:
         )
         with self._buf_lock:
             self._buffer[order_id] = row
-            self._kept += 1
+            self._accepted += 1
 
     def _on_message(self, data: bytes) -> None:
+        self._messages += 1
         try:
             payload = json.loads(data.decode())
         except (ValueError, UnicodeDecodeError):
@@ -185,10 +192,11 @@ class NatsConsumer:
             batch = self._drain_buffer()
             if batch:
                 try:
-                    self._stored += self.storage.upsert_orders(batch)
+                    self._written += self.storage.upsert_orders(batch)
                     now = datetime.now(timezone.utc)
                     self.storage.set_meta("orderbook_updated_at", now.isoformat())
-                    self.storage.set_meta("orderbook_received", str(self._kept))
+                    self.storage.set_meta("orderbook_accepted", str(self._accepted))
+                    self.storage.set_meta("orderbook_written", str(self._written))
                 except Exception:
                     log.exception("failed to store order batch")
 
@@ -207,8 +215,9 @@ class NatsConsumer:
                 # `stored` must track `relevant` closely; a persistent gap means
                 # orders are being dropped rather than merely queued.
                 log.info(
-                    "order feed: %d seen, %d relevant, %d stored, %d queued (session totals)",
-                    self._received, self._kept, self._stored, self.backlog(),
+                    "order feed (session): %d msgs, %d orders seen, %d ours, %d written, "
+                    "%d queued",
+                    self._messages, self._seen, self._accepted, self._written, self.backlog(),
                 )
 
         batch = self._drain_buffer()

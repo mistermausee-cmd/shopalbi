@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-VERSION = "5.1.0"
+VERSION = "5.1.2"
 
 
 def _get(name: str, default: str) -> str:
@@ -181,15 +181,23 @@ DEFAULT_BUY_MODE = _get("SHOPALBI_BUY_MODE", "instant")
 DEFAULT_SELL_MODE = _get("SHOPALBI_SELL_MODE", "instant")
 
 
+# Both factors are rounded so the value used in the arithmetic is EXACTLY the one
+# reported by the API and shown in the UI. Left raw, 1 - 0.04 - 0.025 evaluates to
+# 0.9349999999999999 while the interface says 0.935, and that invisible gap flips
+# the occasional rounding — making a displayed profit impossible to reproduce from
+# the displayed inputs.
+_FACTOR_DP = 6
+
+
 def net_factor(sell_mode: str = DEFAULT_SELL_MODE, sales_tax: float | None = None) -> float:
     """Fraction of the Black Market price you actually keep."""
     tax = SALES_TAX if sales_tax is None else sales_tax
-    return 1.0 - tax - (SETUP_FEE if sell_mode == "order" else 0.0)
+    return round(1.0 - tax - (SETUP_FEE if sell_mode == "order" else 0.0), _FACTOR_DP)
 
 
 def cost_factor(buy_mode: str = DEFAULT_BUY_MODE) -> float:
     """Multiplier on the city price you actually pay."""
-    return 1.0 + (SETUP_FEE if buy_mode == "order" else 0.0)
+    return round(1.0 + (SETUP_FEE if buy_mode == "order" else 0.0), _FACTOR_DP)
 
 
 # --- Transport risk ---------------------------------------------------------
@@ -293,13 +301,18 @@ NATS_URL = _get(
     "SHOPALBI_NATS_URL",
     "nats://public:thenewalbiondata@nats.albion-online-data.com:34222",
 )
-# `marketorders.deduped` is one order per message; `.bulk` is the same data
-# batched into arrays. Subscribing to both raises coverage and is safe because
-# orders are upserted by their unique Id. Never subscribe to `.ingest`: those
-# messages carry raw prices scaled by 10000 and include duplicates.
+# ONE topic only. Measured over 100 s of live traffic: `marketorders.deduped`
+# (one order per message) and `marketorders.deduped.bulk` (the same orders
+# batched into arrays) delivered 465 unique order ids each, with 100% overlap and
+# zero ids unique to either side. Subscribing to both therefore doubles parsing
+# work for no extra coverage, and — worse — double-counts every order, which made
+# the feed log look like it was losing half the data when it was not.
+#
+# Never subscribe to `marketorders.ingest`: it carries duplicates and prices
+# scaled by 10000 (7160000 where deduped says 716).
 NATS_TOPICS = [
     t.strip() for t in
-    _get("SHOPALBI_NATS_TOPICS", "marketorders.deduped,marketorders.deduped.bulk").split(",")
+    _get("SHOPALBI_NATS_TOPICS", "marketorders.deduped").split(",")
     if t.strip()
 ]
 

@@ -237,12 +237,17 @@ function colsPlan() {
     { key: 'avg_price', label: 'Средняя', value: (r) => r.avg_price,
       hint: 'Средняя цена за штуку, если скупить всё рекомендованное количество по возрастающим лотам.',
       render: (r) => money(r.avg_price, 'big'), csv: (r) => r.avg_price },
-    { key: 'bm_buy_now', label: 'Ставка ЧР', value: (r) => r.bm_buy_now, hint: H.bmPrice,
-      render: (r) => `<span class="num" style="color:var(--gold)">${fmt(r.bm_buy_now)}</span>`
+    { key: 'avg_sell', label: 'Продажа ЧР', value: (r) => r.avg_sell,
+      hint: 'Средняя цена, по которой уйдёт ВСЁ это количество — по ней и считается прибыль.'
+          + ' Верхняя ставка ЧР покрывает лишь несколько штук (на живых данных бывает 1–3% спроса),'
+          + ' остальное выкупают ордера подешевле. Максимальная ставка показана под средней.'
+          + ' Если они равны — всё количество уходит по лучшей цене.',
+      render: (r) => `<span class="num big" style="color:var(--gold)">${fmt(r.avg_sell)}</span>`
+        + `<span class="sub2">макс. ${fmt(r.bm_buy_now)}`
         + (r.quality_upsell
-            ? `<span class="sub2" title="Ордер выкупа принимает своё качество и выше, и платит больше именно за это.">в ордер «${esc(qualityRu(r.bm_quality))}»</span>`
-            : ''),
-      csv: (r) => r.bm_buy_now },
+            ? ` · ордер «${esc(qualityRu(r.bm_quality))}»`
+            : '') + '</span>',
+      csv: (r) => r.avg_sell },
     { key: 'total_cost', label: 'Затраты', value: (r) => r.total_cost,
       render: (r) => money(r.total_cost), csv: (r) => r.total_cost },
     { key: 'total_profit', label: 'Прибыль', value: (r) => r.total_profit,
@@ -361,8 +366,14 @@ function onSort(key) {
   if (s.key === key) s.dir = (s.dir === 'asc' ? 'desc' : 'asc');
   else { s.key = key; s.dir = ASC_FIRST.has(key) ? 'asc' : 'desc'; }
   // Client-sorted views re-render instantly; server-sorted views refetch.
-  if (CLIENT_SORTED.has(state.view)) render();
-  else load();
+  if (CLIENT_SORTED.has(state.view)) {
+    render();
+  } else {
+    // Move the arrow now so the click is acknowledged even if the fetch is
+    // queued behind one already in flight.
+    if (state.cols) renderHead(state.cols);
+    load();
+  }
 }
 
 function sortedRows(cols) {
@@ -556,8 +567,16 @@ function filters() {
 const ENDPOINT = { flips: '/api/flips', plan: '/api/plan', cities: '/api/cities', stats: '/api/stats' };
 
 async function load() {
-  if (state.loading) return;
+  // Coalesce instead of dropping. This used to `return` while a request was in
+  // flight, so clicking a column header during a load silently threw the new
+  // sort away: the state changed, no fetch happened, and the arrow stayed on the
+  // old column. Now the last request always wins.
+  if (state.loading) {
+    state.pending = true;
+    return;
+  }
   state.loading = true;
+  state.pending = false;
   $('#loader').hidden = false;
   try {
     const d = await fetchJSON(`${ENDPOINT[state.view]}?${filters()}`);
@@ -577,6 +596,7 @@ async function load() {
   } finally {
     state.loading = false;
     $('#loader').hidden = true;     // always cleared, even on a thrown render
+    if (state.pending) load();      // a newer request arrived while we were busy
   }
 }
 

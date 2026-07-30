@@ -278,7 +278,10 @@ class Analytics:
             "history_refreshed_at": s.get_meta("history_refreshed_at"),
             "history_rows": int(s.get_meta("history_rows", "0")),
             "orderbook": book,
-            "orderbook_received": int(s.get_meta("orderbook_received", "0")),
+            # Session counters (reset on restart). `accepted` and `written`
+            # should stay close; a lasting gap means orders are being dropped.
+            "orderbook_accepted": int(s.get_meta("orderbook_accepted", "0")),
+            "orderbook_written": int(s.get_meta("orderbook_written", "0")),
             "orderbook_updated_at": s.get_meta("orderbook_updated_at"),
             "refresh_running": s.get_meta("refresh_running", "0") == "1",
             # Which calendar days each window actually averages.
@@ -397,18 +400,31 @@ class Analytics:
 
         out: list[dict] = []
         for r in rows:
-            cost = float(r["buy_cost"])
-            revenue = float(r["bm_price"]) * net
-            profit = revenue - cost
+            # Every derived number is computed from the values we actually DISPLAY,
+            # rounded exactly as the UI shows them. Scores used to be built from
+            # full-precision inputs while the row carried rounded ones, so the
+            # reliability on screen could not be reproduced from the figures next
+            # to it — which makes the tool impossible to audit. Cost is also
+            # multiplied in Python rather than trusting SQLite's float, so the
+            # result does not depend on which engine did the arithmetic.
+            buy_price = int(r["buy_price_raw"])
+            bm_price = int(r["bm_price"])
+            cost = buy_price * cost_mult
             if cost <= 0:
                 continue
-            roi = profit / cost
+            revenue = bm_price * net
+            profit = round(revenue - cost)
 
-            bm_daily = float(r["bm_daily"])
-            fresh = freshness_score(float(r["buy_age_h"]), float(r["bm_age_h"]))
+            buy_age = round(float(r["buy_age_h"]), 1)
+            bm_age = round(float(r["bm_age_h"]), 1)
+            bm_daily = round(float(r["bm_daily"]), 1)
+            bm_vwap = int(r["bm_vwap"])
+            bm_ask = int(r["bm_ask"])
+
+            fresh = freshness_score(buy_age, bm_age)
             liq = liquidity_score(bm_daily)
-            stab = stability_score(float(r["bm_price"]), float(r["bm_vwap"]))
-            comp = competition_score(float(r["bm_price"]), float(r["bm_ask"]))
+            stab = stability_score(bm_price, bm_vwap)
+            comp = competition_score(bm_price, bm_ask)
 
             qty_city = qty_bm = None
             depth = None
@@ -424,16 +440,16 @@ class Analytics:
             score = reliability(fresh, liq, stab, depth, comp)
 
             p = city_gank_rate(r["buy_city"], gank_rate)
-            ev_unit = (1.0 - p) * revenue - cost
+            ev_unit = round((1.0 - p) * revenue - cost)
             breakeven_p = 1.0 - (cost / revenue) if revenue > 0 else 0.0
 
             # window-average profit: the same flip priced off the BM's own
             # volume-weighted average instead of the momentary bid. If this is
             # much worse than the live number, the live number is a spike.
-            profit_vwap = float(r["bm_vwap"]) * net - cost
+            profit_vwap = round(bm_vwap * net - cost)
             trend = 0.0
-            if r["bm_vwap"] and r["bm_vwap_day"]:
-                trend = (float(r["bm_vwap_day"]) / float(r["bm_vwap"]) - 1.0) * 100.0
+            if bm_vwap and r["bm_vwap_day"]:
+                trend = (float(r["bm_vwap_day"]) / bm_vwap - 1.0) * 100.0
 
             available = None
             if qty_city is not None and qty_bm is not None:
@@ -450,29 +466,31 @@ class Analytics:
                 "category": r["category"],
                 "category_label": config.CATEGORY_NAMES.get(r["category"], r["category"]),
                 "buy_city": r["buy_city"],
-                "buy_price": r["buy_price_raw"],
+                "buy_price": buy_price,
                 "buy_cost": round(cost),
-                "buy_age_h": round(float(r["buy_age_h"]), 1),
-                "bm_price": r["bm_price"],
+                "buy_age_h": buy_age,
+                "bm_price": bm_price,
                 "bm_quality": r["bm_quality"],
                 "bm_quality_label": config.QUALITY_NAMES.get(r["bm_quality"], str(r["bm_quality"])),
                 "quality_upsell": r["bm_quality"] < r["quality"],
-                "bm_age_h": round(float(r["bm_age_h"]), 1),
-                "bm_vwap": r["bm_vwap"],
-                "bm_ask": r["bm_ask"],
-                "bm_daily_volume": round(bm_daily, 1),
+                "bm_age_h": bm_age,
+                "bm_vwap": bm_vwap,
+                "bm_ask": bm_ask,
+                "bm_daily_volume": bm_daily,
                 "bm_days": r["bm_days"],
                 "city_vwap": r["city_vwap"],
                 "bm_trend_pct": round(trend, 1),
-                "profit": round(profit),
-                "profit_pct": round(roi * 100.0, 1),
-                "profit_vwap": round(profit_vwap),
+                # Percentages come from the ROUNDED silver figures shown beside
+                # them, so `profit / buy_price` on screen reproduces them exactly.
+                "profit": profit,
+                "profit_pct": round(profit / cost * 100.0, 1),
+                "profit_vwap": profit_vwap,
                 "profit_pct_vwap": round(profit_vwap / cost * 100.0, 1),
-                "ev_unit": round(ev_unit),
+                "ev_unit": ev_unit,
                 "ev_pct": round(ev_unit / cost * 100.0, 1),
                 "gank_rate": round(p * 100.0, 1),
                 "breakeven_gank_pct": round(breakeven_p * 100.0, 1),
-                "spike": float(r["bm_vwap"]) > 0 and float(r["bm_price"]) > config.BM_MAX_VS_VWAP * float(r["bm_vwap"]),
+                "spike": bm_vwap > 0 and bm_price > config.BM_MAX_VS_VWAP * bm_vwap,
                 "avail_city": qty_city,
                 "avail_bm": qty_bm,
                 "available": available,
@@ -484,7 +502,7 @@ class Analytics:
                 "opportunity": round(ev_unit * score / 100.0),
                 # Daily opportunity: what the item is worth if you work it all
                 # day, bounded by what the Black Market can actually absorb.
-                "throughput": round(ev_unit * score / 100.0 * min(bm_daily, 200.0)),
+                "throughput": round(round(ev_unit * score / 100.0) * min(bm_daily, 200.0)),
             })
 
         with self._lock:
@@ -541,6 +559,23 @@ class Analytics:
         min_bm_volume = config.DEFAULT_MIN_BM_DAILY_VOLUME if min_bm_volume is None else min_bm_volume
         gank = config.DEFAULT_GANK_RATE if gank_rate is None else gank_rate
 
+        # A city that is not a permitted buy source must never leak in through a
+        # query parameter — otherwise `?buy_city=Brecilien` quietly bypasses the
+        # exclusion policy that the rest of the app enforces.
+        if buy_city and buy_city not in config.BUY_CITIES:
+            return {
+                "window": window, "window_days": config.STAT_WINDOWS.get(window, 7),
+                "window_range": self.storage.get_meta(f"agg_range_{window}"),
+                "buy_mode": buy_mode, "sell_mode": sell_mode,
+                "net": config.net_factor(sell_mode), "cost_mult": config.cost_factor(buy_mode),
+                "sales_tax": config.SALES_TAX, "setup_fee": config.SETUP_FEE,
+                "gank_rate": gank, "min_profit": min_profit,
+                "min_profit_pct": min_profit_pct, "min_bm_volume": min_bm_volume,
+                "buy_city": buy_city, "sort": sort, "direction": direction,
+                "total": 0, "rows": [],
+                "note": f"{buy_city} не входит в список городов закупки",
+            }
+
         cands = self._candidates(
             window, buy_mode, sell_mode, min_profit, min_profit_pct, min_bm_volume,
             gank, category, tier, enchant, quality, search,
@@ -569,8 +604,8 @@ class Analytics:
             "window_range": self.storage.get_meta(f"agg_range_{window}"),
             "buy_mode": buy_mode,
             "sell_mode": sell_mode,
-            "net": round(config.net_factor(sell_mode), 4),
-            "cost_mult": round(config.cost_factor(buy_mode), 4),
+            "net": config.net_factor(sell_mode),
+            "cost_mult": config.cost_factor(buy_mode),
             "sales_tax": config.SALES_TAX,
             "setup_fee": config.SETUP_FEE,
             "gank_rate": gank,
@@ -761,7 +796,7 @@ class Analytics:
             "total": total, "offset": offset, "limit": limit,
             "sort": sort, "direction": direction,
             "cities": config.ROYAL_CITIES,
-            "net": round(net, 4),
+            "net": net,
             "rows": out[offset: offset + limit],
         }
 
@@ -814,7 +849,9 @@ class Analytics:
         for c in cands:
             by_city[c["buy_city"]].append(c)
 
-        cities = [city] if city else list(config.BUY_CITIES)
+        # Same guard as flips(): an excluded or unknown city must not become a
+        # buy base just because it was passed as a parameter.
+        cities = ([city] if city in config.BUY_CITIES else []) if city else list(config.BUY_CITIES)
         plans = []
         for cy in cities:
             offers = self._city_offers(cy)
@@ -827,8 +864,10 @@ class Analytics:
         book = self.storage.order_book_stats(min_seen)
         return {
             "window": window, "budget": budget,
+            "window_days": config.STAT_WINDOWS.get(window, 7),
+            "window_range": self.storage.get_meta(f"agg_range_{window}"),
             "buy_mode": buy_mode, "sell_mode": sell_mode,
-            "net": round(net, 4), "cost_mult": round(cost_mult, 4),
+            "net": net, "cost_mult": cost_mult,
             "sales_tax": config.SALES_TAX, "setup_fee": config.SETUP_FEE,
             "gank_rate": gank,
             "requested_city": city,
@@ -912,7 +951,7 @@ class Analytics:
                 out.append([deep, rest, m["quality"]])
         return out
 
-    def _plan_city(self, city, budget, cands, offers, bm_req, net, cost_mult, gank) -> dict:
+    def _plan_city(self, city, budget, cands, offers, bm_req, net, cost_mult, gank) -> dict:  # noqa: C901
         """Build one city's plan. Returns aggregated per-item buy instructions."""
         p = city_gank_rate(city, gank)
         by_item: dict[str, list[dict]] = defaultdict(list)
@@ -1053,6 +1092,11 @@ class Analytics:
                 "avg_cost": round(cost / qty) if qty else 0,
                 "total_cost": round(cost),
                 "bm_buy_now": a["bm_top"],
+                # The price you actually average across the orders being filled.
+                # `bm_buy_now` is only the BEST bid; showing it alone next to a
+                # profit computed from the whole matched book looks inconsistent,
+                # because the deeper orders pay less.
+                "avg_sell": round(revenue / qty / net) if qty else 0,
                 "bm_quality": a["bm_quality"],
                 "bm_quality_label": config.QUALITY_NAMES.get(a["bm_quality"], str(a["bm_quality"])),
                 "quality_upsell": a["bm_quality"] < q,
